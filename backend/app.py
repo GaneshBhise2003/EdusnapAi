@@ -26,9 +26,9 @@ import whisper
 from pathlib import Path
 
 # Add with your other configurations
-GEMINI_API_KEY = "AIzaSyCpe6Sh2PC1aoCo8bHasHqnVkKh8n-ChyA"  # Consider using environment variables
-
-
+# GEMINI_API_KEY = "AIzaSyCpe6Sh2PC1aoCo8bHasHqnVkKh8n-ChyA"  # Consider using environment variables
+# GEMINI_API_KEY="AIzaSyA4SJ0PR9zHtyLbjNVCfgzRtod58KnrUKg"
+GEMINI_API_KEY="AIzaSyD3fJt0W25oQKbclBxrzHZvFCyHSM1ve3s"
 
 
 

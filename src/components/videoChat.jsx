@@ -513,7 +513,13 @@ import { useLocation } from "react-router-dom";
 import ReactPlayer from "react-player";
 import "animate.css";
 
+import { useAuthState } from 'react-firebase-hooks/auth';
+import { auth } from './firebase';
+import FloatingNotes from './FloatingNotes';
+
 const VideoChatbotPage = () => {
+  const [user] = useAuthState(auth);
+
   const location = useLocation();
   const videoUrl = location.state?.videoUrl || "https://www.w3schools.com/html/mov_bbb.mp4";
   const [transcript, setTranscript] = useState(null);
@@ -541,6 +547,7 @@ const [analysisComplete, setAnalysisComplete] = useState(false);
 // Add these state variables
 const [transcriptionReady, setTranscriptionReady] = useState(false);
 const [showSummaryButton, setShowSummaryButton] = useState(false);
+
 
 // Modify your main useEffect
 useEffect(() => {
@@ -819,6 +826,8 @@ const formatInlineElements = (text) => {
   const handleKeyDown = (e) => {
     if (e.key === "Enter") handleSend();
   };
+
+  
 
   return (
 <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50 p-4 md:p-6 animate__animated animate__fadeIn">
@@ -1107,6 +1116,9 @@ const formatInlineElements = (text) => {
           </div>
         </div>
       )}
+
+            <FloatingNotes videoUrl={videoUrl} />
+
     </div>
   );
 };
