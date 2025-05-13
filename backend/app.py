@@ -705,7 +705,94 @@ def _build_cors_preflight_response():
 
 def _corsify_actual_response(response, status_code=200):
     response.headers.add("Access-Control-Allow-Origin", "*")
-    return response, status_code             
+    return response, status_code     
+
+
+# Add this new route
+@app.route('/api/generate_notes/<output_dir>', methods=['POST'])
+def generate_notes(output_dir):
+    try:
+        print(f"[INFO] Generating smart notes for {output_dir}")
+        
+        # Path to transcript
+        transcript_path = os.path.join(OUTPUT_FOLDER, output_dir, "transcript.txt")
+        
+        if not os.path.exists(transcript_path):
+            return jsonify({
+                'status': 'error',
+                'message': 'Transcript not found'
+            }), 404
+
+        # Read transcript
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            transcript = f.read()
+
+        # Generate notes using Gemini
+        notes = generate_notes_with_gemini(transcript)
+        
+        # Save notes
+        notes_path = os.path.join(OUTPUT_FOLDER, output_dir, "smart_notes.md")
+        with open(notes_path, 'w', encoding='utf-8') as f:
+            f.write(notes)
+            
+        return jsonify({
+            'status': 'success',
+            'notes': notes,
+            'notes_path': f"api/results/{output_dir}/smart_notes.md"
+        })
+        
+    except Exception as e:
+        print(f"[ERROR] Notes generation failed: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+# Add this new helper function
+def generate_notes_with_gemini(transcript):
+    """Generate structured notes from transcript using Gemini"""
+    try:
+        headers = {"Content-Type": "application/json"}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={GEMINI_API_KEY}"
+
+        prompt = """**Instruction**: Convert this video transcript into well-organized Markdown notes with bullet points. Follow these rules:
+
+1. Identify natural sections/topics based on content
+2. For each section:
+   - Add a ### heading
+   - Include 3-5 key bullet points
+   - Use concise, clear language
+3. Highlight important terms in **bold**
+4. Add timestamps in parentheses where topics change
+5. Keep technical concepts accurate
+
+**Transcript**:
+{transcript}
+
+**Output ONLY the Markdown notes, no additional commentary**:"""
+        
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt.format(transcript=transcript)}]
+            }],
+            "generationConfig": {
+                "temperature": 0.2,  # Lower for more factual output
+                "maxOutputTokens": 4000
+            }
+        }
+
+        print("[INFO] Sending request to Gemini for notes generation...")
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        result = response.json()
+        
+        notes = result["candidates"][0]["content"]["parts"][0]["text"]
+        print("[INFO] Successfully generated smart notes")
+        return notes
+        
+    except Exception as e:
+        print(f"[ERROR] Gemini notes generation failed: {str(e)}")
+        raise Exception("AI notes generation failed")
 
 if __name__ == '__main__':
     print("[INFO] Starting Flask server on http://0.0.0.0:5000 ...")

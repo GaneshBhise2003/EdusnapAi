@@ -516,6 +516,46 @@ import "animate.css";
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth } from './firebase';
 import FloatingNotes from './FloatingNotes';
+import { marked } from 'marked';
+
+
+
+const generateSmartNotes = async () => {
+  if (!outputDir) return;
+  
+  setIsGeneratingNotes(true);
+  setNotesStatus("Generating smart notes...");
+  
+  try {
+    const response = await fetch(`http://localhost:5000/api/generate_notes/${outputDir}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error("Failed to generate notes");
+    }
+    
+    const data = await response.json();
+    setNotes(data.notes);
+    setNotesStatus("✅ Notes generated");
+    
+    // Add a system message about the notes
+    setMessages(prev => [...prev, {
+      sender: "bot",
+      text: "I've generated structured notes from this video. You can find them below the transcript.",
+      isSystem: true
+    }]);
+    
+  } catch (error) {
+    console.error("Notes generation error:", error);
+    setNotesStatus(`❌ Failed to generate notes: ${error.message}`);
+  } finally {
+    setIsGeneratingNotes(false);
+  }
+};
 
 const VideoChatbotPage = () => {
   const [user] = useAuthState(auth);
@@ -536,7 +576,20 @@ const VideoChatbotPage = () => {
   const [outputDir, setOutputDir] = useState("");
   const [selectedFrame, setSelectedFrame] = useState(null);
   const [showModal, setShowModal] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);const [notes, setNotes] = useState(null);
+  const [isGeneratingNotes, setIsGeneratingNotes] = useState(false);
+  const [notesStatus, setNotesStatus] = useState("");
+
+  const [showPdfOptions, setShowPdfOptions] = useState(false);
+const [pdfOptions, setPdfOptions] = useState({
+  includeFrames: true,
+  includeSummary: true,
+  includeNotes: true,
+  includeTranscript: false
+});
+const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+
+
 
   useEffect(() => {
     setHasRendered(true);
@@ -548,6 +601,43 @@ const [analysisComplete, setAnalysisComplete] = useState(false);
 const [transcriptionReady, setTranscriptionReady] = useState(false);
 const [showSummaryButton, setShowSummaryButton] = useState(false);
 
+
+const generateSmartNotes = async () => {
+  if (!outputDir) return;
+  
+  setIsGeneratingNotes(true);
+  setNotesStatus("Generating smart notes...");
+  
+  try {
+    const response = await fetch(`http://localhost:5000/api/generate_notes/${outputDir}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error("Failed to generate notes");
+    }
+    
+    const data = await response.json();
+    setNotes(data.notes);
+    setNotesStatus("✅ Notes generated");
+    
+    // Add a system message about the notes
+    setMessages(prev => [...prev, {
+      sender: "bot",
+      text: "I've generated structured notes from this video. You can find them below the transcript.",
+      isSystem: true
+    }]);
+    
+  } catch (error) {
+    console.error("Notes generation error:", error);
+    setNotesStatus(`❌ Failed to generate notes: ${error.message}`);
+  } finally {
+    setIsGeneratingNotes(false);
+  }
+};
 
 // Modify your main useEffect
 useEffect(() => {
@@ -664,9 +754,7 @@ useEffect(() => {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
-        },
-        // Add empty body if your backend expects JSON
-        body: JSON.stringify({})  
+        }
       });
       
       if (!response.ok) {
@@ -683,6 +771,9 @@ useEffect(() => {
       if (data.summary) {
         setSummary(data.summary);
       }
+      
+      // Automatically generate notes after summary
+      await generateSmartNotes();
       
       setTranscriptionReady(true);
       setShowSummaryButton(false);
@@ -827,6 +918,134 @@ const formatInlineElements = (text) => {
     if (e.key === "Enter") handleSend();
   };
 
+
+
+  const generatePdf = async () => {
+    setIsGeneratingPdf(true);
+    setShowPdfOptions(false);
+    
+    try {
+      const { jsPDF } = await import('jspdf');
+      const doc = new jsPDF();
+      let yPosition = 20;
+  
+      // Add title
+      doc.setFontSize(20);
+      doc.text('Video Analysis Report', 105, yPosition, { align: 'center' });
+      yPosition += 20;
+  
+      // Add date
+      doc.setFontSize(12);
+      doc.text(`Generated on: ${new Date().toLocaleDateString()}`, 105, yPosition, { align: 'center' });
+      yPosition += 20;
+  
+      // Add summary if selected
+      if (pdfOptions.includeSummary && summary) {
+        doc.setFontSize(16);
+        doc.text('Summary', 14, yPosition);
+        yPosition += 10;
+        doc.setFontSize(12);
+        const splitSummary = doc.splitTextToSize(summary, 180);
+        doc.text(splitSummary, 14, yPosition);
+        yPosition += splitSummary.length * 7 + 20;
+        doc.addPage();
+        yPosition = 20;
+      }
+  
+      // Add notes if selected
+      if (pdfOptions.includeNotes && notes) {
+        doc.setFontSize(16);
+        doc.text('Smart Notes', 14, yPosition);
+        yPosition += 10;
+        doc.setFontSize(12);
+        const splitNotes = doc.splitTextToSize(notes, 180);
+        doc.text(splitNotes, 14, yPosition);
+        yPosition += splitNotes.length * 7 + 20;
+        doc.addPage();
+        yPosition = 20;
+      }
+  
+      // Add transcript if selected
+      if (pdfOptions.includeTranscript && transcript) {
+        doc.setFontSize(16);
+        doc.text('Transcript', 14, yPosition);
+        yPosition += 10;
+        doc.setFontSize(10);
+        const splitTranscript = doc.splitTextToSize(transcript, 180);
+        doc.text(splitTranscript, 14, yPosition);
+        yPosition += splitTranscript.length * 5 + 20;
+        doc.addPage();
+        yPosition = 20;
+      }
+  
+      // Add frames if selected - NEW IMPROVED VERSION
+      if (pdfOptions.includeFrames && frameUrls.length > 0) {
+        doc.setFontSize(16);
+        doc.text('Key Frames', 105, yPosition, { align: 'center' });
+        yPosition += 20;
+  
+        // Create a temporary container for images
+        const tempContainer = document.createElement('div');
+        tempContainer.style.position = 'absolute';
+        tempContainer.style.left = '-9999px';
+        document.body.appendChild(tempContainer);
+  
+        try {
+          for (let i = 0; i < frameUrls.length; i++) {
+            const img = document.createElement('img');
+            img.src = frameUrls[i].url;
+            img.style.maxWidth = '200px';
+            img.style.height = 'auto';
+            tempContainer.appendChild(img);
+  
+            // Wait for image to load
+            await new Promise((resolve) => {
+              img.onload = resolve;
+              img.onerror = resolve; // Continue even if one image fails
+            });
+  
+            // Calculate dimensions
+            const imgWidth = 80;
+            const imgHeight = img.naturalHeight ? 
+              (img.naturalHeight * imgWidth) / img.naturalWidth : 
+              60; // Fallback height
+  
+            // Add new page if needed
+            if (i > 0 && i % 2 === 0) {
+              doc.addPage();
+              yPosition = 20;
+            }
+  
+            // Add image to PDF
+            doc.addImage(
+              img, 
+              'JPEG', 
+              i % 2 === 0 ? 20 : 110, 
+              yPosition, 
+              imgWidth, 
+              imgHeight
+            );
+  
+            if (i % 2 === 1) {
+              yPosition += imgHeight + 10;
+            }
+          }
+        } finally {
+          // Clean up
+          document.body.removeChild(tempContainer);
+        }
+      }
+  
+      // Save the PDF
+      doc.save('video-analysis-report.pdf');
+      
+    } catch (error) {
+      console.error('Error generating PDF:', error);
+      alert('Failed to generate PDF. Please try again.');
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  };
   
 
   return (
@@ -941,62 +1160,103 @@ const formatInlineElements = (text) => {
   </div>
 
       {/* Status Bar */}
-      <div className="bg-white rounded-lg p-4 mb-6 shadow-md">
-  <div className="flex items-center justify-between">
-    <div>
-      <span className="font-semibold text-purple-600 mr-2">Status:</span>
-      <span className={loadingStatus.includes("✅") ? "text-green-600" : loadingStatus.includes("❌") ? "text-red-600" : "text-gray-700"}>
+<div className="bg-white rounded-lg p-4 mb-6 shadow-md">
+  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+    {/* Left side - Status indicators */}
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="font-semibold text-purple-600 mr-1">Status:</span>
+      
+      {/* Main processing status */}
+      <span className={`text-sm ${loadingStatus.includes("✅") ? "text-green-600" : loadingStatus.includes("❌") ? "text-red-600" : "text-gray-700"}`}>
         {loadingStatus}
       </span>
+      
+      {/* Available resources indicators */}
       {transcriptionReady && (
-        <>
-          <span className="ml-2 text-green-600">
-            <svg className="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Transcript available */}
+          <span className="text-xs bg-green-50 text-green-700 px-2 py-1 rounded-full flex items-center">
+            <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            Transcript available
+            Transcript
           </span>
-          <span className="ml-2 text-blue-600">
-            <svg className="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          
+          {/* Summary available */}
+          <span className="text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded-full flex items-center">
+            <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16m-7 6h7" />
             </svg>
-            Summary available
+            Summary
           </span>
-        </>
+          
+          {/* Notes available (conditional) */}
+          {notes && (
+            <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-1 rounded-full flex items-center">
+              <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Notes
+            </span>
+          )}
+        </div>
       )}
     </div>
-    {showSummaryButton && (
-      <button 
-        onClick={handleGenerateSummary}
-        disabled={isProcessing}
-        className={`px-3 py-1 rounded-md text-sm ${
-          isProcessing 
-            ? 'bg-purple-400 cursor-not-allowed' 
-            : 'bg-purple-600 hover:bg-purple-700'
-        } text-white`}
-      >
-        {isProcessing ? (
-          <span className="flex items-center">
-            <svg className="w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            Processing...
-          </span>
-        ) : (
-          "Generate Summary"
-        )}
-      </button>
-    )}
-    {outputDir && (
-      <span className="text-sm text-gray-500">
-        <svg className="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z" />
-        </svg>
-        {outputDir}
-      </span>
-    )}
+
+    {/* Right side - Action buttons and output info */}
+    <div className="flex items-center gap-3">
+      {/* Generate Summary button (conditional) */}
+      {showSummaryButton && (
+        <button 
+          onClick={handleGenerateSummary}
+          disabled={isProcessing}
+          className={`px-3 py-1 rounded-md text-sm flex items-center ${
+            isProcessing 
+              ? 'bg-purple-400 cursor-not-allowed' 
+              : 'bg-purple-600 hover:bg-purple-700'
+          } text-white transition-colors`}
+        >
+          {isProcessing ? (
+            <>
+              <svg className="w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              Processing...
+            </>
+          ) : (
+            <>
+              <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              Generate Summary
+            </>
+          )}
+        </button>
+      )}
+
+      {/* Output directory info */}
+      {outputDir && (
+        <div className="text-xs text-gray-500 flex items-center">
+          <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z" />
+          </svg>
+          <span className="hidden sm:inline">Output:</span>
+          <span className="font-mono ml-1">{outputDir}</span>
+        </div>
+      )}
+    </div>
   </div>
+
+  {/* Notes generation status (appears below when generating) */}
+  {isGeneratingNotes && (
+    <div className="mt-2 text-xs text-purple-600 flex items-center">
+      <svg className="w-3 h-3 animate-spin mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+      </svg>
+      {notesStatus}
+    </div>
+  )}
 </div>
 
       {/* Summary Section */}
@@ -1017,6 +1277,44 @@ const formatInlineElements = (text) => {
           </div>
         </div>
       )}
+
+      {/* Smart Notes Section */}
+{notes && (
+  <div className="bg-white rounded-xl shadow-lg overflow-hidden mb-6">
+    <div className="p-4 border-b border-gray-200 flex justify-between items-center">
+      <h3 className="text-lg font-bold text-purple-700 flex items-center">
+        <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+        </svg>
+        Smart Notes
+      </h3>
+      <a 
+        href={`http://localhost:5000/api/results/${outputDir}/smart_notes.md`} 
+        download
+        className="text-sm text-purple-600 hover:text-purple-800 flex items-center"
+      >
+        <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+        </svg>
+        Download
+      </a>
+    </div>
+    <div className="p-4 max-h-96 overflow-y-auto">
+      <div 
+        className="prose max-w-none" 
+        dangerouslySetInnerHTML={{ __html: marked.parse(notes) }}
+      />
+    </div>
+    {isGeneratingNotes && (
+      <div className="p-4 bg-gray-50 text-center text-sm text-gray-500">
+        <svg className="w-4 h-4 inline-block animate-spin mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+        {notesStatus}
+      </div>
+    )}
+  </div>
+)}
 
       {/* Transcript Section */}
       {transcriptionReady && transcript && (
@@ -1119,6 +1417,93 @@ const formatInlineElements = (text) => {
 
             <FloatingNotes videoUrl={videoUrl} />
 
+
+  {/* PDF Floating Button */}
+  {analysisComplete && (
+      <button
+        onClick={() => setShowPdfOptions(true)}
+        disabled={isGeneratingPdf}
+        className="fixed bottom-6 left-6 bg-red-600 hover:bg-red-700 text-white rounded-full p-4 shadow-lg z-50 flex items-center justify-center"
+      >
+        {isGeneratingPdf ? (
+          <svg className="w-6 h-6 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+        ) : (
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
+          </svg>
+        )}
+      </button>
+    )}
+
+    {/* PDF Options Modal */}
+    {showPdfOptions && (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <div className="bg-white rounded-xl p-6 max-w-md w-full">
+          <h3 className="text-xl font-bold mb-4">Select PDF Content</h3>
+          
+          <div className="space-y-3 mb-6">
+            <label className="flex items-center space-x-3">
+              <input
+                type="checkbox"
+                checked={pdfOptions.includeFrames}
+                onChange={() => setPdfOptions({...pdfOptions, includeFrames: !pdfOptions.includeFrames})}
+                className="form-checkbox h-5 w-5 text-purple-600 rounded"
+              />
+              <span>Include Key Frames ({frameUrls.length})</span>
+            </label>
+            
+            <label className="flex items-center space-x-3">
+              <input
+                type="checkbox"
+                checked={pdfOptions.includeSummary}
+                onChange={() => setPdfOptions({...pdfOptions, includeSummary: !pdfOptions.includeSummary})}
+                className="form-checkbox h-5 w-5 text-purple-600 rounded"
+              />
+              <span>Include Summary</span>
+            </label>
+            
+            <label className="flex items-center space-x-3">
+              <input
+                type="checkbox"
+                checked={pdfOptions.includeNotes}
+                onChange={() => setPdfOptions({...pdfOptions, includeNotes: !pdfOptions.includeNotes})}
+                className="form-checkbox h-5 w-5 text-purple-600 rounded"
+              />
+              <span>Include Smart Notes</span>
+            </label>
+            
+            <label className="flex items-center space-x-3">
+              <input
+                type="checkbox"
+                checked={pdfOptions.includeTranscript}
+                onChange={() => setPdfOptions({...pdfOptions, includeTranscript: !pdfOptions.includeTranscript})}
+                className="form-checkbox h-5 w-5 text-purple-600 rounded"
+              />
+              <span>Include Transcript</span>
+            </label>
+          </div>
+          
+          <div className="flex justify-end space-x-3">
+            <button
+              onClick={() => setShowPdfOptions(false)}
+              className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={generatePdf}
+              className="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700"
+            >
+              Generate PDF
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    
     </div>
   );
 };
