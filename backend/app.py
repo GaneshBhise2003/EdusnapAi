@@ -24,13 +24,38 @@ import base64
 import requests
 import whisper
 from pathlib import Path
+from threading import Lock
+import json
+import re
+import logging
+from datetime import datetime
+from functools import wraps
 
+
+# Session storage
+chat_sessions = {}
+session_lock = Lock()
 # Add with your other configurations
 # GEMINI_API_KEY = "AIzaSyCpe6Sh2PC1aoCo8bHasHqnVkKh8n-ChyA"  # Consider using environment variables
 # GEMINI_API_KEY="AIzaSyA4SJ0PR9zHtyLbjNVCfgzRtod58KnrUKg"
 GEMINI_API_KEY="AIzaSyD3fJt0W25oQKbclBxrzHZvFCyHSM1ve3s"
 
-
+SUPPORTED_LANGUAGES = {
+    'en': 'English',
+    'hi': 'Hindi (हिन्दी)',
+    'bn': 'Bengali (বাংলা)',
+    'ta': 'Tamil (தமிழ்)',
+    'te': 'Telugu (తెలుగు)',
+    'mr': 'Marathi (मराठी)',
+    'gu': 'Gujarati (ગુજરાતી)',
+    'kn': 'Kannada (ಕನ್ನಡ)',
+    'ml': 'Malayalam (മലയാളം)',
+    'pa': 'Punjabi (ਪੰਜਾਬੀ)',
+    'or': 'Odia (ଓଡ଼ିଆ)',
+    'as': 'Assamese (অসমীয়া)',
+    'sa': 'Sanskrit (संस्कृतम्)',
+    'ur': 'Urdu (اردو)'
+}
 
 
 # Initialize Flask app
@@ -40,9 +65,20 @@ CORS(app, resources={
     r"/api/*": {
         "origins": ["http://localhost:3000", "http://your-react-app-domain.com"],
         "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
+        "allow_headers": ["Content-Type"],
+        "supports_credentials": True
     }
 })
+def _build_cors_preflight_response():
+    response = jsonify({'status': 'success'})
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add("Access-Control-Allow-Headers", "*")
+    response.headers.add("Access-Control-Allow-Methods", "*")
+    return response
+
+def _corsify_actual_response(response, status_code=200):
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    return response, status_code
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
@@ -449,8 +485,20 @@ def analyze_video():
             generate_dataset(filepath, output_dir, csv_path)
             print(f"[INFO] Video analysis completed. Output saved to {output_dir}")
 
+            output_dir = os.path.join(OUTPUT_FOLDER, output_dir_name)
+
             copied_frames = copy_high_content_frames(output_dir_name)
             print(f"[INFO] Copied {len(copied_frames)} frames to React public folder")
+
+            # 1. Extract audio immediately after frame extraction
+            audio_path = os.path.join(output_dir, 'audio.wav')
+            if not extract_audio(filepath, audio_path):
+                raise Exception("Audio extraction failed")
+
+            # 2. Generate initial transcript and summary
+            transcript, summary = process_transcription(filepath, output_dir)
+            if not transcript:
+                raise Exception("Initial transcription failed")
 
             # Get the list of actual frame filenames that were copied
             react_folder = os.path.join(REACT_FRAMES_FOLDER, output_dir_name)
@@ -709,13 +757,65 @@ def _corsify_actual_response(response, status_code=200):
 
 
 # Add this new route
+# @app.route('/api/generate_notes/<output_dir>', methods=['POST'])
+# def generate_notes(output_dir):
+#     try:
+#         print(f"[INFO] Generating smart notes for {output_dir}")
+        
+#         # Path to transcript
+#         transcript_path = os.path.join(OUTPUT_FOLDER, output_dir, "transcript.txt")
+        
+#         if not os.path.exists(transcript_path):
+#             return jsonify({
+#                 'status': 'error',
+#                 'message': 'Transcript not found'
+#             }), 404
+
+#         # Read transcript
+#         with open(transcript_path, 'r', encoding='utf-8') as f:
+#             transcript = f.read()
+
+#         # Generate notes using Gemini
+#         notes = generate_notes_with_gemini(transcript)
+        
+#         # Save notes
+#         notes_path = os.path.join(OUTPUT_FOLDER, output_dir, "smart_notes.md")
+#         with open(notes_path, 'w', encoding='utf-8') as f:
+#             f.write(notes)
+            
+#         return jsonify({
+#             'status': 'success',
+#             'notes': notes,
+#             'notes_path': f"api/results/{output_dir}/smart_notes.md"
+#         })
+        
+#     except Exception as e:
+#         print(f"[ERROR] Notes generation failed: {str(e)}")
+#         return jsonify({
+#             'status': 'error',
+#             'message': str(e)
+#         }), 500
+
 @app.route('/api/generate_notes/<output_dir>', methods=['POST'])
 def generate_notes(output_dir):
+    """Generate notes in specified language"""
     try:
-        print(f"[INFO] Generating smart notes for {output_dir}")
+        data = request.get_json()
+        language = data.get('language', 'en')  # Default to English
         
-        # Path to transcript
-        transcript_path = os.path.join(OUTPUT_FOLDER, output_dir, "transcript.txt")
+        if language not in SUPPORTED_LANGUAGES:
+            return jsonify({
+                'status': 'error',
+                'message': f'Unsupported language. Supported languages: {", ".join(SUPPORTED_LANGUAGES.values())}'
+            }), 400
+        
+        output_path = os.path.join(OUTPUT_FOLDER, output_dir)
+        transcript_path = os.path.join(output_path, 'transcript.txt')
+        
+        # First try to get language-specific transcript
+        lang_transcript_path = os.path.join(output_path, f'transcript_{language}.txt')
+        if os.path.exists(lang_transcript_path):
+            transcript_path = lang_transcript_path
         
         if not os.path.exists(transcript_path):
             return jsonify({
@@ -723,30 +823,65 @@ def generate_notes(output_dir):
                 'message': 'Transcript not found'
             }), 404
 
-        # Read transcript
         with open(transcript_path, 'r', encoding='utf-8') as f:
             transcript = f.read()
 
-        # Generate notes using Gemini
-        notes = generate_notes_with_gemini(transcript)
+        # Generate notes in specified language
+        prompt = f"""**Instruction**: Convert this video transcript into well-organized Markdown notes in {SUPPORTED_LANGUAGES[language]}. Follow these rules:
+
+1. Use {SUPPORTED_LANGUAGES[language]} language only
+2. Identify natural sections/topics based on content
+3. For each section:
+   - Add a ### heading
+   - Include 3-5 key bullet points
+   - Use concise, clear language
+4. Highlight important terms in **bold**
+5. Add timestamps where topics change
+6. Keep technical concepts accurate
+
+**Transcript**:
+{transcript}
+
+**Output ONLY the Markdown notes in {SUPPORTED_LANGUAGES[language]}, no additional commentary**:"""
         
-        # Save notes
-        notes_path = os.path.join(OUTPUT_FOLDER, output_dir, "smart_notes.md")
+        headers = {"Content-Type": "application/json"}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={GEMINI_API_KEY}"
+
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 4000
+            }
+        }
+
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        result = response.json()
+        
+        notes = result["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # Save language-specific notes
+        notes_filename = f'smart_notes_{language}.md'
+        notes_path = os.path.join(output_path, notes_filename)
         with open(notes_path, 'w', encoding='utf-8') as f:
             f.write(notes)
             
         return jsonify({
             'status': 'success',
             'notes': notes,
-            'notes_path': f"api/results/{output_dir}/smart_notes.md"
+            'language': SUPPORTED_LANGUAGES[language],
+            'notes_path': notes_filename
         })
         
     except Exception as e:
-        print(f"[ERROR] Notes generation failed: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': str(e)
         }), 500
+
 
 # Add this new helper function
 def generate_notes_with_gemini(transcript):
@@ -793,6 +928,474 @@ def generate_notes_with_gemini(transcript):
     except Exception as e:
         print(f"[ERROR] Gemini notes generation failed: {str(e)}")
         raise Exception("AI notes generation failed")
+    
+
+# Update the ChatSession class to handle multiple languages
+class ChatSession:
+    def __init__(self, output_dir):
+        self.output_dir = output_dir
+        self.language = 'en'  # Default language
+        self.transcript = None
+        self.summary = None
+        self.notes = None
+        self.messages = []
+        self.load_resources()
+        
+    def set_language(self, language):
+        if language in SUPPORTED_LANGUAGES:
+            self.language = language
+            self.load_resources()
+            return True
+        return False
+        
+    def load_resources(self):
+        """Load language-specific resources"""
+        output_path = os.path.join(OUTPUT_FOLDER, self.output_dir)
+        
+        # Try to load language-specific files first
+        lang_specific_summary = os.path.join(output_path, f'summary_{self.language}.txt')
+        if os.path.exists(lang_specific_summary):
+            with open(lang_specific_summary, 'r', encoding='utf-8') as f:
+                self.summary = f.read()
+        else:
+            default_summary = os.path.join(output_path, 'summary.txt')
+            if os.path.exists(default_summary):
+                with open(default_summary, 'r', encoding='utf-8') as f:
+                    self.summary = f.read()
+        
+        lang_specific_transcript = os.path.join(output_path, f'transcript_{self.language}.txt')
+        if os.path.exists(lang_specific_transcript):
+            with open(lang_specific_transcript, 'r', encoding='utf-8') as f:
+                self.transcript = f.read()
+        else:
+            default_transcript = os.path.join(output_path, 'transcript.txt')
+            if os.path.exists(default_transcript):
+                with open(default_transcript, 'r', encoding='utf-8') as f:
+                    self.transcript = f.read()
+        
+        lang_specific_notes = os.path.join(output_path, f'smart_notes_{self.language}.md')
+        if os.path.exists(lang_specific_notes):
+            with open(lang_specific_notes, 'r', encoding='utf-8') as f:
+                self.notes = f.read()
+        else:
+            default_notes = os.path.join(output_path, 'smart_notes.md')
+            if os.path.exists(default_notes):
+                with open(default_notes, 'r', encoding='utf-8') as f:
+                    self.notes = f.read()
+
+    def add_message(self, role, content):
+        self.messages.append({'role': role, 'content': content})
+        
+    def get_context(self):
+        return {
+            'language': SUPPORTED_LANGUAGES[self.language],
+            'transcript': self.transcript,
+            'summary': self.summary,
+            'notes': self.notes,
+            'conversation': self.messages[-10:]  # Last 10 messages
+        }
+
+# Update the chat endpoints to support language
+@app.route('/api/chat/set_language', methods=['POST'])
+def set_chat_language():
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id')
+        language = data.get('language')
+        
+        if not session_id or not language:
+            return jsonify({'status': 'error', 'message': 'Missing parameters'}), 400
+        
+        if language not in SUPPORTED_LANGUAGES:
+            return jsonify({
+                'status': 'error',
+                'message': f'Unsupported language. Supported languages: {", ".join(SUPPORTED_LANGUAGES.values())}'
+            }), 400
+        
+        with session_lock:
+            session = chat_sessions.get(session_id)
+            if not session:
+                return jsonify({'status': 'error', 'message': 'Invalid session ID'}), 404
+            
+            if session.set_language(language):
+                return jsonify({
+                    'status': 'success',
+                    'message': f'Language changed to {SUPPORTED_LANGUAGES[language]}',
+                    'language': language
+                })
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Failed to change language'
+                }), 400
+                
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+    
+
+@app.route('/api/chat/start_session/<output_dir>', methods=['POST', 'OPTIONS'])
+def start_chat_session(output_dir):
+    """Initialize a new chat session with enhanced features"""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    
+    try:
+        # Input validation
+        if not output_dir or not re.match(r'^[a-zA-Z0-9_-]+$', output_dir):
+            return _corsify_actual_response(jsonify({
+                'status': 'error',
+                'message': 'Invalid output directory format'
+            }), 400)
+
+        logging.info(f"Starting chat session for {output_dir}")
+
+        # Verify resources exist
+        output_path = os.path.join(OUTPUT_FOLDER, output_dir)
+        required_files = {
+            'summary': 'summary.txt',
+            'transcript': 'transcript.txt'
+        }
+
+        missing_files = []
+        for name, filename in required_files.items():
+            if not os.path.exists(os.path.join(output_path, filename)):
+                missing_files.append(name)
+
+        if missing_files:
+            message = f"Missing required files: {', '.join(missing_files)}"
+            logging.error(message)
+            return _corsify_actual_response(jsonify({
+                'status': 'error',
+                'message': message,
+                'missing_files': missing_files
+            }), 404)
+
+        # Create new session
+        session_id = str(uuid.uuid4())
+        with session_lock:
+            chat_sessions[session_id] = ChatSession(output_dir)
+            logging.info(f"Created new chat session {session_id}")
+
+        # Load initial context
+        session = chat_sessions[session_id]
+        summary_preview = (session.summary[:200] + '...') if session.summary else 'No summary available'
+
+        return _corsify_actual_response(jsonify({
+            'status': 'success',
+            'session_id': session_id,
+            'summary_preview': summary_preview,
+            'message': 'Chat session initialized',
+            'timestamp': datetime.now().isoformat(),
+            'language': session.language,
+            'supported_languages': list(SUPPORTED_LANGUAGES.keys())
+        }))
+
+    except Exception as e:
+        logging.error(f"Failed to start chat session: {str(e)}", exc_info=True)
+        return _corsify_actual_response(jsonify({
+            'status': 'error',
+            'message': 'Failed to initialize chat session',
+            'details': str(e)
+        }), 500)
+
+# Update the send_message endpoint to use language context
+@app.route('/api/chat/send_message', methods=['POST'])
+def handle_chat_message():
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id')
+        message = data.get('message')
+        
+        if not session_id or not message:
+            return jsonify({'status': 'error', 'message': 'Missing parameters'}), 400
+        
+        with session_lock:
+            session = chat_sessions.get(session_id)
+            if not session:
+                return jsonify({'status': 'error', 'message': 'Invalid session ID'}), 404
+            
+            try:
+                # Add user message to history
+                session.add_message('user', message)
+                
+                # Get context including language
+                context = session.get_context()
+                
+                prompt = f"""You are an educational video assistant. Current language: {context['language']}
+                
+                Video Summary: {context['summary'] or 'No summary available'}
+                Key Notes: {context['notes'] or 'No notes available'}
+                
+                Conversation History:
+                {json.dumps(context['conversation'], indent=2)}
+                
+                Current Question: {message}
+                
+                Provide a helpful response in {context['language']} based on the video content.
+                If the question isn't answerable from the video, politely explain that.
+                """
+                
+                headers = {"Content-Type": "application/json"}
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={GEMINI_API_KEY}"
+                
+                payload = {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.3,
+                        "maxOutputTokens": 2000
+                    }
+                }
+                
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
+                response.raise_for_status()
+                result = response.json()
+                
+                if not result.get('candidates'):
+                    raise ValueError("No candidates in response")
+                
+                bot_response = result["candidates"][0]["content"]["parts"][0]["text"]
+                session.add_message('assistant', bot_response)
+                
+                return jsonify({
+                    'status': 'success',
+                    'response': bot_response,
+                    'session_id': session_id,
+                    'language': session.language
+                })
+                
+            except requests.exceptions.RequestException as e:
+                return jsonify({
+                    'status': 'error',
+                    'message': f"API request failed: {str(e)}"
+                }), 502
+            except Exception as e:
+                return jsonify({
+                    'status': 'error',
+                    'message': f"Processing failed: {str(e)}"
+                }), 500
+                
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f"Server error: {str(e)}"
+        }), 500
+    
+@app.route('/api/get_supported_languages', methods=['GET'])
+def get_supported_languages():
+    """Endpoint to get list of supported languages"""
+    return jsonify({
+        'status': 'success',
+        'languages': SUPPORTED_LANGUAGES
+    })  
+
+
+@app.route('/api/generate_summary/<output_dir>', methods=['POST'])
+def generate_summary(output_dir):
+    """Generate summary in specified language"""
+    try:
+        data = request.get_json()
+        language = data.get('language', 'en')  # Default to English
+        
+        if language not in SUPPORTED_LANGUAGES:
+            return jsonify({
+                'status': 'error',
+                'message': f'Unsupported language. Supported languages: {", ".join(SUPPORTED_LANGUAGES.values())}'
+            }), 400
+        
+        output_path = os.path.join(OUTPUT_FOLDER, output_dir)
+        transcript_path = os.path.join(output_path, 'transcript.txt')
+        
+        if not os.path.exists(transcript_path):
+            return jsonify({'status': 'error', 'message': 'Transcript not found'}), 404
+            
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            transcript = f.read()
+        
+        # Customize prompt based on language
+        prompt = f"""
+        Please summarize the following video transcript in {SUPPORTED_LANGUAGES[language]}.
+        Focus on the key points and main ideas. Organize the summary into 
+        logical sections if appropriate. Aim for about 20% of the original length.
+        
+        Provide the summary in {SUPPORTED_LANGUAGES[language]} only.
+        
+        Transcript:
+        {transcript}
+        """
+        
+        headers = {"Content-Type": "application/json"}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={GEMINI_API_KEY}"
+        
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 2000
+            }
+        }
+        
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        result = response.json()
+        
+        summary = result["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # Save language-specific summary
+        summary_filename = f'summary_{language}.txt'
+        summary_path = os.path.join(output_path, summary_filename)
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            f.write(summary)
+            
+        return jsonify({
+            'status': 'success',
+            'summary': summary,
+            'language': SUPPORTED_LANGUAGES[language],
+            'summary_path': summary_filename
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500  
+    
+@app.route('/api/generate_transcript/<output_dir>', methods=['POST', 'OPTIONS'])
+def generate_transcript(output_dir):
+    """Generate transcript in specified language with enhanced features"""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    
+    try:
+        # Input validation
+        if not output_dir or not re.match(r'^[a-zA-Z0-9_-]+$', output_dir):
+            return _corsify_actual_response(jsonify({
+                'status': 'error',
+                'message': 'Invalid output directory format'
+            }), 400)
+
+        data = request.get_json()
+        if not data:
+            return _corsify_actual_response(jsonify({
+                'status': 'error',
+                'message': 'No data provided'
+            }), 400)
+
+        language = data.get('language', 'en')
+        logging.info(f"Transcript generation requested for {output_dir} in {language}")
+
+        # Language validation
+        if language not in SUPPORTED_LANGUAGES:
+            return _corsify_actual_response(jsonify({
+                'status': 'error',
+                'message': f'Unsupported language. Supported: {", ".join(SUPPORTED_LANGUAGES.values())}'
+            }), 400)
+
+        output_path = os.path.join(OUTPUT_FOLDER, output_dir)
+        os.makedirs(output_path, exist_ok=True)
+
+        # Check for existing transcript
+        transcript_filename = f'transcript_{language}.txt'
+        transcript_path = os.path.join(output_path, transcript_filename)
+        
+        if os.path.exists(transcript_path):
+            logging.info(f"Found existing transcript at {transcript_path}")
+            with open(transcript_path, 'r', encoding='utf-8') as f:
+                transcript = f.read()
+            return _corsify_actual_response(jsonify({
+                'status': 'success',
+                'transcript': transcript,
+                'language': SUPPORTED_LANGUAGES[language],
+                'transcript_path': transcript_filename,
+                'from_cache': True
+            }))
+
+        # Audio extraction
+        audio_path = os.path.join(output_path, 'audio.wav')
+        video_path = next((f for ext in ALLOWED_EXTENSIONS 
+                          for f in glob.glob(os.path.join(output_path, f'*.{ext}'))), None)
+
+        if not video_path and not os.path.exists(audio_path):
+            logging.error("No audio or video file found")
+            return _corsify_actual_response(jsonify({
+                'status': 'error',
+                'message': 'No audio or video file found'
+            }), 404)
+
+        if not os.path.exists(audio_path):
+            logging.info("Extracting audio from video...")
+            if not extract_audio(video_path, audio_path):
+                raise Exception("Audio extraction failed")
+
+        # Gemini API request
+        prompt = f"""
+        Transcribe this audio verbatim in {SUPPORTED_LANGUAGES[language]}.
+        Include timestamps every 30 seconds.
+        Maintain original meaning and context.
+        """
+
+        with open(audio_path, "rb") as f:
+            audio_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+        headers = {"Content-Type": "application/json"}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={GEMINI_API_KEY}"
+
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "audio/wav",
+                            "data": audio_base64
+                        }
+                    }
+                ]
+            }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 4000
+            }
+        }
+
+        logging.info("Sending request to Gemini API...")
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        
+        transcript = result["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # Save transcript
+        with open(transcript_path, 'w', encoding='utf-8') as f:
+            f.write(transcript)
+        logging.info(f"Transcript saved to {transcript_path}")
+
+        return _corsify_actual_response(jsonify({
+            'status': 'success',
+            'transcript': transcript,
+            'language': SUPPORTED_LANGUAGES[language],
+            'transcript_path': transcript_filename,
+            'from_cache': False
+        }))
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"API request failed: {str(e)}")
+        return _corsify_actual_response(jsonify({
+            'status': 'error',
+            'message': 'Failed to connect to transcription service',
+            'details': str(e)
+        }), 502)
+    except Exception as e:
+        logging.error(f"Unexpected error: {str(e)}", exc_info=True)
+        return _corsify_actual_response(jsonify({
+            'status': 'error',
+            'message': 'Transcript generation failed',
+            'details': str(e)
+        }), 500)
 
 if __name__ == '__main__':
     print("[INFO] Starting Flask server on http://0.0.0.0:5000 ...")
