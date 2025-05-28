@@ -517,45 +517,10 @@ import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth } from './firebase';
 import FloatingNotes from './FloatingNotes';
 import { marked } from 'marked';
+import QuickRevision from './QuickRevision'; // Import the new component
 
 
 
-const generateSmartNotes = async () => {
-  if (!outputDir) return;
-  
-  setIsGeneratingNotes(true);
-  setNotesStatus("Generating smart notes...");
-  
-  try {
-    const response = await fetch(`http://localhost:5000/api/generate_notes/${outputDir}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      }
-    });
-    
-    if (!response.ok) {
-      throw new Error("Failed to generate notes");
-    }
-    
-    const data = await response.json();
-    setNotes(data.notes);
-    setNotesStatus("✅ Notes generated");
-    
-    // Add a system message about the notes
-    setMessages(prev => [...prev, {
-      sender: "bot",
-      text: "I've generated structured notes from this video. You can find them below the transcript.",
-      isSystem: true
-    }]);
-    
-  } catch (error) {
-    console.error("Notes generation error:", error);
-    setNotesStatus(`❌ Failed to generate notes: ${error.message}`);
-  } finally {
-    setIsGeneratingNotes(false);
-  }
-};
 
 const VideoChatbotPage = () => {
   const [user] = useAuthState(auth);
@@ -579,6 +544,7 @@ const VideoChatbotPage = () => {
   const [isProcessing, setIsProcessing] = useState(false);const [notes, setNotes] = useState(null);
   const [isGeneratingNotes, setIsGeneratingNotes] = useState(false);
   const [notesStatus, setNotesStatus] = useState("");
+  const [activeTab, setActiveTab] = useState('summary'); // 'summary', 'notes', or 'frames'
 
   const [showPdfOptions, setShowPdfOptions] = useState(false);
 const [pdfOptions, setPdfOptions] = useState({
@@ -600,37 +566,66 @@ const [analysisComplete, setAnalysisComplete] = useState(false);
 // Add these state variables
 const [transcriptionReady, setTranscriptionReady] = useState(false);
 const [showSummaryButton, setShowSummaryButton] = useState(false);
+const [chatSessionId, setChatSessionId] = useState(null);
+const [isStartingSession, setIsStartingSession] = useState(false);  
 
+const [languages] = useState([
+  { code: 'en', name: 'English' },
+  { code: 'hi', name: 'Hindi (हिन्दी)' },
+  { code: 'bn', name: 'Bengali (বাংলা)' },
+  { code: 'ta', name: 'Tamil (தமிழ்)' },
+  { code: 'te', name: 'Telugu (తెలుగు)' },
+  { code: 'mr', name: 'Marathi (मराठी)' },
+  { code: 'gu', name: 'Gujarati (ગુજરાતી)' },
+  { code: 'kn', name: 'Kannada (ಕನ್ನಡ)' },
+  { code: 'ml', name: 'Malayalam (മലയാളം)' },
+  { code: 'pa', name: 'Punjabi (ਪੰਜਾਬੀ)' },
+  { code: 'or', name: 'Odia (ଓଡ଼ିଆ)' },
+  { code: 'as', name: 'Assamese (অসমীয়া)' },
+  { code: 'sa', name: 'Sanskrit (संस्कृतम्)' },
+  { code: 'ur', name: 'Urdu (اردو)' }
+]);
+
+const [selectedLanguage, setSelectedLanguage] = useState('en');
+const [showLanguageSelector, setShowLanguageSelector] = useState(false);
 
 const generateSmartNotes = async () => {
-  if (!outputDir) return;
-  
+  if (!outputDir || !transcript) {
+    alert("Please ensure the video has been processed and transcription is ready.");
+    return;
+  }
+
   setIsGeneratingNotes(true);
   setNotesStatus("Generating smart notes...");
-  
+
   try {
-    const response = await fetch(`http://localhost:5000/api/generate_notes/${outputDir}`, {
+    const response = await fetch(`http://localhost:5000/api/generate_notes`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
-      }
+      },
+      body: JSON.stringify({
+        transcript: transcript,
+        summary: summary, // Optional: if you modify your Gemini prompt to use summary
+        output_dir: outputDir,
+        language: selectedLanguage // <<< ADD THIS LINE >>>
+      })
     });
-    
+
     if (!response.ok) {
       throw new Error("Failed to generate notes");
     }
-    
+
     const data = await response.json();
     setNotes(data.notes);
     setNotesStatus("✅ Notes generated");
-    
-    // Add a system message about the notes
+
     setMessages(prev => [...prev, {
       sender: "bot",
       text: "I've generated structured notes from this video. You can find them below the transcript.",
       isSystem: true
     }]);
-    
+
   } catch (error) {
     console.error("Notes generation error:", error);
     setNotesStatus(`❌ Failed to generate notes: ${error.message}`);
@@ -747,37 +742,43 @@ useEffect(() => {
     if (!outputDir) return;
     
     setIsProcessing(true);
-    setLoadingStatus("Generating transcript and summary...");
+    setLoadingStatus(`Generating transcript and summary in ${languages.find(l => l.code === selectedLanguage)?.name}...`);
     
     try {
-      const response = await fetch(`http://localhost:5000/api/process_transcription/${outputDir}`, {
+      // First generate transcript
+      const transcriptResponse = await fetch(`http://localhost:5000/api/generate_transcript/${outputDir}`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        }
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: selectedLanguage })
       });
       
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || "Failed to generate summary");
+      if (!transcriptResponse.ok) {
+        throw new Error("Failed to generate transcript");
       }
       
-      const data = await response.json();
+      const transcriptData = await transcriptResponse.json();
+      setTranscript(transcriptData.transcript);
       
-      if (data.transcript) {
-        setTranscript(data.transcript);
+      // Then generate summary
+      const summaryResponse = await fetch(`http://localhost:5000/api/generate_summary/${outputDir}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: selectedLanguage })
+      });
+      
+      if (!summaryResponse.ok) {
+        throw new Error("Failed to generate summary");
       }
       
-      if (data.summary) {
-        setSummary(data.summary);
-      }
+      const summaryData = await summaryResponse.json();
+      setSummary(summaryData.summary);
       
-      // Automatically generate notes after summary
+      // Automatically generate notes
       await generateSmartNotes();
       
       setTranscriptionReady(true);
       setShowSummaryButton(false);
-      setLoadingStatus("✅ Analysis complete");
+      setLoadingStatus(`✅ Analysis complete in ${languages.find(l => l.code === selectedLanguage)?.name}`);
     } catch (err) {
       console.error("Summary generation error:", err);
       setLoadingStatus(`❌ Failed to generate summary: ${err.message}`);
@@ -814,39 +815,123 @@ const queryGemini = async (query) => {
   }
 };
 
-// Update your handleSend function
+// Initialize chat session when analysis is complete
+useEffect(() => {
+  if (analysisComplete && outputDir && !chatSessionId) {
+    startChatSession();
+  }
+}, [analysisComplete, outputDir]);
+
+const startChatSession = async () => {
+  setIsStartingSession(true);
+  try {
+    const response = await fetch(`http://localhost:5000/api/chat/start_session/${outputDir}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      setChatSessionId(data.session_id);
+      
+      // Set the language for the session
+      await fetch('http://localhost:5000/api/chat/set_language', {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          session_id: data.session_id,
+          language: selectedLanguage
+        })
+      });
+      
+      // Add welcome message with video context
+      setMessages(prev => [...prev, {
+        sender: "bot",
+        text: `I'm ready to discuss this video with you in ${languages.find(l => l.code === selectedLanguage)?.name}.${summary ? ` Here's a quick overview:\n\n${summary.substring(0, 200)}...` : ''}\n\nAsk me anything about the content!`,
+        isSystem: true
+      }]);
+    }
+  } catch (err) {
+    console.error("Failed to start chat session:", err);
+  } finally {
+    setIsStartingSession(false);
+  }
+};
+
 // Update your handleSend function
 const handleSend = async () => {
   if (!input.trim()) return;
   
+  if (!chatSessionId) {
+    setMessages(prev => [...prev, {
+      sender: "bot",
+      text: "Please wait while I finish initializing the video context...",
+      isSystem: true
+    }]);
+    return;
+  }
+
   const userMessage = { sender: "user", text: input };
-  setMessages((prev) => [...prev, userMessage]);
+  setMessages(prev => [...prev, userMessage]);
   setInput("");
   
   // Show typing indicator
   setMessages(prev => [...prev, { sender: "bot", text: "Typing...", isTyping: true }]);
   
   try {
-    const response = await queryGemini(input);
+    const response = await fetch('http://localhost:5000/api/chat/send_message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: chatSessionId,
+        message: input
+      })
+    });
+    
+    const data = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(data.message || "Failed to process your question");
+    }
+    
+    // Replace typing indicator with actual response
     setMessages(prev => [
       ...prev.filter(msg => !msg.isTyping),
       { 
         sender: "bot", 
-        text: response,
+        text: data.response,
         reference: "Based on video analysis"
       }
     ]);
+    
   } catch (error) {
     console.error("Chat error:", error);
     setMessages(prev => [
       ...prev.filter(msg => !msg.isTyping),
       { 
         sender: "bot", 
-        text: "Sorry, I'm experiencing technical difficulties. Please try again later.",
+        text: error.message.includes("API request failed")
+          ? "I'm having trouble connecting to the knowledge service. Please try again later."
+          : error.message,
+        isSystem: true
       }
     ]);
   }
 };
+// Add frame reference capability to chat
+const handleFrameReference = async (frameNumber) => {
+  if (!chatSessionId) return;
+  
+  const question = `Can you explain what's happening in frame ${frameNumber}?`;
+  setInput(question);
+  
+  // Trigger send after a small delay to allow input to update
+  setTimeout(() => {
+    handleSend();
+  }, 100);
+};
+
+
 
 const formatMessageText = (text) => {
   if (!text) return null;
@@ -919,78 +1004,490 @@ const formatInlineElements = (text) => {
   };
 
 
-
+  // const PdfGenerator = () => {
+  //   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  //   const [showPdfOptions, setShowPdfOptions] = useState(false);
+  
+  //   // Enhanced detectScript function with better language support
+  //   const detectScript = (text) => {
+  //     if (!text) return 'latin';
+      
+  //     // Check character by character for mixed content
+  //     for (let i = 0; i < Math.min(text.length, 10); i++) {
+  //       const char = text.charAt(i);
+  //       const code = char.charCodeAt(0);
+        
+  //       // Devanagari (Hindi, Marathi, Sanskrit)
+  //       if (code >= 0x0900 && code <= 0x097F) return 'devanagari';
+  //       // Bengali
+  //       if (code >= 0x0980 && code <= 0x09FF) return 'bengali';
+  //       // Tamil
+  //       if (code >= 0x0B80 && code <= 0x0BFF) return 'tamil';
+  //       // Telugu
+  //       if (code >= 0x0C00 && code <= 0x0C7F) return 'telugu';
+  //       // Gujarati
+  //       if (code >= 0x0A80 && code <= 0x0AFF) return 'gujarati';
+  //       // Kannada
+  //       if (code >= 0x0C80 && code <= 0x0CFF) return 'kannada';
+  //       // Malayalam
+  //       if (code >= 0x0D00 && code <= 0x0D7F) return 'malayalam';
+  //       // Odia
+  //       if (code >= 0x0B00 && code <= 0x0B7F) return 'oriya';
+  //       // Arabic (Urdu)
+  //       if (code >= 0x0600 && code <= 0x06FF) return 'arabic';
+  //     }
+      
+  //     return 'latin';
+  //   };
+  
+  //   const getFontForScript = (script) => {
+  //     const fontMap = {
+  //       devanagari: 'notosansdevanagari',
+  //       bengali: 'notosansbengali',
+  //       tamil: 'notosanstamil',
+  //       telugu: 'notosanstelugu',
+  //       gujarati: 'notosansgujarati',
+  //       kannada: 'notosanskannada',
+  //       malayalam: 'notosansmalayalam',
+  //       oriya: 'notosansoriya',
+  //       arabic: 'notosansarabic',
+  //       latin: 'notosans'
+  //     };
+  //     return fontMap[script] || 'notosans';
+  //   };
+  
+  //   const arrayBufferToBase64 = (buffer) => {
+  //     let binary = '';
+  //     const bytes = new Uint8Array(buffer);
+  //     for (let i = 0; i < bytes.byteLength; i++) {
+  //       binary += String.fromCharCode(bytes[i]);
+  //     }
+  //     return window.btoa(binary);
+  //   };
+  
+  //   const loadFonts = async (doc) => {
+  //     const fontUrls = {
+  //       notosans: '/fonts/NotoSans-Regular.ttf',
+  //       notosansdevanagari: '/fonts/NotoSansDevanagari-Regular.ttf',
+  //       notosansbengali: '/fonts/NotoSansBengali-Regular.ttf',
+  //       notosanstamil: '/fonts/NotoSansTamil-Regular.ttf',
+  //       notosanstelugu: '/fonts/NotoSansTelugu-Regular.ttf',
+  //       notosansgujarati: '/fonts/NotoSansGujarati-Regular.ttf',
+  //       notosanskannada: '/fonts/NotoSansKannada-Regular.ttf',
+  //       notosansmalayalam: '/fonts/NotoSansMalayalam-Regular.ttf',
+  //       notosansoriya: '/fonts/NotoSansOriya-Regular.ttf',
+  //       notosansarabic: '/fonts/NotoSansArabic-Regular.ttf'
+  //     };
+  
+  //     for (const [fontName, url] of Object.entries(fontUrls)) {
+  //       try {
+  //         const response = await fetch(url);
+  //         const fontData = await response.arrayBuffer();
+  //         const fontBase64 = arrayBufferToBase64(fontData);
+  //         doc.addFileToVFS(`${fontName}.ttf`, fontBase64);
+  //         doc.addFont(`${fontName}.ttf`, fontName, 'normal');
+  //       } catch (error) {
+  //         console.warn(`Failed to load font ${fontName}:`, error);
+  //       }
+  //     }
+  //   };
+  
+  //   const renderMixedContent = (doc, text, x, y, maxWidth, fontSize) => {
+  //     let currentY = y;
+  //     let currentX = x;
+  //     let currentFont = 'notosans';
+      
+  //     // Split text into words while preserving spaces
+  //     const words = text.split(/(\s+)/).filter(w => w.length > 0);
+      
+  //     for (const word of words) {
+  //       const wordScript = detectScript(word);
+  //       const wordFont = getFontForScript(wordScript);
+        
+  //       // Change font if needed
+  //       if (wordFont !== currentFont) {
+  //         currentFont = wordFont;
+  //         doc.setFont(currentFont, 'normal');
+  //       }
+        
+  //       const wordWidth = doc.getTextWidth(word);
+        
+  //       // Handle line breaks
+  //       if (currentX + wordWidth > x + maxWidth) {
+  //         currentX = x;
+  //         currentY += fontSize * 1.2;
+          
+  //         // Handle page breaks
+  //         if (currentY > 280) {
+  //           doc.addPage();
+  //           currentY = 20;
+  //           currentX = x;
+  //         }
+  //       }
+        
+  //       // Special handling for RTL scripts
+  //       if (wordScript !== 'latin') {
+  //         const rtlWord = [...word].reverse().join('');
+  //         doc.text(rtlWord, currentX, currentY, { charSpace: 0.15 });
+  //       } else {
+  //         doc.text(word, currentX, currentY);
+  //       }
+        
+  //       currentX += wordWidth;
+  //     }
+      
+  //     return currentY;
+  //   };
+  
+  //   const generatePdf = async () => {
+  //     setIsGeneratingPdf(true);
+  //     setShowPdfOptions(false);
+      
+  //     try {
+  //       const { jsPDF } = await import('jspdf');
+  //       const doc = new jsPDF({
+  //         orientation: 'portrait',
+  //         unit: 'mm',
+  //         format: 'a4',
+  //         compress: true
+  //       });
+  
+  //       await loadFonts(doc);
+  
+  //       doc.setProperties({
+  //         title: 'Video Analysis Report',
+  //         subject: 'Multilingual Video Content Analysis',
+  //         author: 'Your App Name',
+  //         keywords: 'video, analysis, multilingual',
+  //         creator: 'Your App Name'
+  //       });
+  
+  //       let yPosition = 20;
+  //       const leftMargin = 15;
+  //       const rightMargin = 15;
+  //       const pageWidth = 210 - leftMargin - rightMargin;
+  
+  //       // Set default font
+  //       doc.setFont('notosans', 'normal');
+  
+  //       // Add title
+  //       doc.setFontSize(20);
+  //       yPosition = renderMixedContent(doc, 'Video Analysis Report', 105, yPosition, pageWidth, 20);
+  //       yPosition += 15;
+  
+  //       // Add date and language info
+  //       doc.setFontSize(12);
+  //       const currentLanguage = languages.find(lang => lang.code === selectedLanguage);
+  //       const dateText = `Generated on: ${new Date().toLocaleDateString()} | Language: ${currentLanguage.name}`;
+  //       yPosition = renderMixedContent(doc, dateText, 105, yPosition, pageWidth, 12);
+  //       yPosition += 15;
+  
+  //       // Helper function to add content sections
+  //       const addContentSection = (title, content, fontSize = 12) => {
+  //         if (!content) return yPosition;
+          
+  //         // Render title
+  //         doc.setFontSize(fontSize + 4);
+  //         yPosition = renderMixedContent(doc, title, leftMargin, yPosition, pageWidth, fontSize + 4);
+  //         yPosition += 10;
+          
+  //         // Render content
+  //         doc.setFontSize(fontSize);
+  //         const paragraphs = content.split('\n');
+  //         for (const para of paragraphs) {
+  //           yPosition = renderMixedContent(doc, para, leftMargin, yPosition, pageWidth, fontSize);
+  //           yPosition += 5; // Paragraph spacing
+  //         }
+          
+  //         return yPosition + 5; // Section spacing
+  //       };
+  
+  //       // Add content sections
+  //       if (pdfOptions.includeSummary && summary) {
+  //         yPosition = addContentSection('Summary', summary);
+  //       }
+  
+  //       if (pdfOptions.includeNotes && notes) {
+  //         yPosition = addContentSection('Smart Notes', notes);
+  //       }
+  
+  //       if (pdfOptions.includeTranscript && transcript) {
+  //         yPosition = addContentSection('Transcript', transcript, 10);
+  //       }
+  
+  //       // Handle images (unchanged from original)
+  //       if (pdfOptions.includeFrames && frameUrls.length > 0) {
+  //         doc.setFont('notosans', 'normal');
+  //         doc.setFontSize(16);
+  //         yPosition = renderMixedContent(doc, 'Key Frames', 105, yPosition, pageWidth, 16);
+  //         yPosition += 20;
+          
+  //         const tempContainer = document.createElement('div');
+  //         tempContainer.style.position = 'absolute';
+  //         tempContainer.style.left = '-9999px';
+  //         document.body.appendChild(tempContainer);
+  
+  //         try {
+  //           const framesPerRow = 2;
+  //           const imgWidth = 80;
+  //           let xPosition = leftMargin;
+            
+  //           for (let i = 0; i < frameUrls.length; i++) {
+  //             const img = document.createElement('img');
+  //             img.src = frameUrls[i].url;
+  //             img.style.maxWidth = '200px';
+  //             img.style.height = 'auto';
+  //             tempContainer.appendChild(img);
+  
+  //             await new Promise((resolve) => {
+  //               img.onload = resolve;
+  //               img.onerror = resolve;
+  //             });
+  
+  //             const imgHeight = img.naturalHeight ? 
+  //               (img.naturalHeight * imgWidth) / img.naturalWidth : 60;
+  
+  //             if (yPosition + imgHeight > 280) {
+  //               doc.addPage();
+  //               yPosition = 20;
+  //               xPosition = leftMargin;
+  //             } else if (i % framesPerRow === 0 && i !== 0) {
+  //               yPosition += imgHeight + 10;
+  //               xPosition = leftMargin;
+  //             }
+  
+  //             doc.addImage(img, 'JPEG', xPosition, yPosition, imgWidth, imgHeight);
+  //             xPosition += imgWidth + 10;
+  //           }
+  //         } finally {
+  //           document.body.removeChild(tempContainer);
+  //         }
+  //       }
+  
+  //       doc.save(`video-analysis-report-${selectedLanguage}.pdf`);
+        
+  //     } catch (error) {
+  //       console.error('Error generating PDF:', error);
+  //       alert('Failed to generate PDF. Please try again.');
+  //     } finally {
+  //       setIsGeneratingPdf(false);
+  //     }
+  //   };
+  // }
   const generatePdf = async () => {
     setIsGeneratingPdf(true);
     setShowPdfOptions(false);
-    
+  
     try {
       const { jsPDF } = await import('jspdf');
-      const doc = new jsPDF();
+      const doc = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4',
+        compress: true
+      });
+  
+      // Load all required fonts
+      await loadFonts(doc);
+  
+      // Set document metadata
+      doc.setProperties({
+        title: 'Video Analysis Report',
+        subject: 'Multilingual Video Content Analysis',
+        author: 'Your App Name',
+        keywords: 'video, analysis, multilingual',
+        creator: 'Your App Name'
+      });
+  
       let yPosition = 20;
+      const leftMargin = 15;
+      const rightMargin = 15;
+      const pageWidth = doc.internal.pageSize.getWidth() - leftMargin - rightMargin; // Calculate dynamic width
   
-      // Add title
-      doc.setFontSize(20);
-      doc.text('Video Analysis Report', 105, yPosition, { align: 'center' });
-      yPosition += 20;
+      // Helper function to detect script
+      const detectScript = (text) => {
+        if (!text) return 'latin';
   
-      // Add date
-      doc.setFontSize(12);
-      doc.text(`Generated on: ${new Date().toLocaleDateString()}`, 105, yPosition, { align: 'center' });
-      yPosition += 20;
+        if (/[\u0900-\u097F]/.test(text)) return 'devanagari';   // Hindi, Marathi (LTR)
+        if (/[\u0980-\u09FF]/.test(text)) return 'bengali';     // Bengali (LTR)
+        if (/[\u0B80-\u0BFF]/.test(text)) return 'tamil';       // Tamil (LTR)
+        if (/[\u0C00-\u0C7F]/.test(text)) return 'telugu';      // Telugu (LTR)
+        if (/[\u0A80-\u0AFF]/.test(text)) return 'gujarati';    // Gujarati (LTR)
+        if (/[\u0C80-\u0CFF]/.test(text)) return 'kannada';     // Kannada (LTR)
+        if (/[\u0D00-\u0D7F]/.test(text)) return 'malayalam';   // Malayalam (LTR)
+        if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(text)) return 'arabic'; // Arabic/Urdu (RTL)
+  
+        return 'latin'; // Default
+      };
+  
+      // Function to render mixed content (remains the same)
+      const renderMixedContent = (text, x, y, maxWidth, fontSize = 12, align = 'left') => {
+        const segments = splitTextByScript(text);
+        let currentY = y;
+  
+        for (const segment of segments) {
+          const font = getFontForScript(segment.script);
+          doc.setFont(font, 'normal');
+          doc.setFontSize(fontSize);
+  
+          let currentX = x;
+          if (align === 'center') {
+            currentX = doc.internal.pageSize.getWidth() / 2;
+          }
+  
+          const lines = doc.splitTextToSize(segment.text, maxWidth);
+  
+          for (const line of lines) {
+            if (currentY > 280) {
+              doc.addPage();
+              currentY = 20;
+              doc.setFont(font, 'normal');
+              doc.setFontSize(fontSize);
+            }
+  
+            let finalX = x;
+            if (align === 'center') {
+              const lineWidth = doc.getStringUnitWidth(line) * fontSize / doc.internal.scaleFactor;
+              finalX = (doc.internal.pageSize.getWidth() - lineWidth) / 2;
+            }
+  
+            doc.text(line, finalX, currentY);
+  
+            currentY += fontSize * 0.35;
+          }
+        }
+  
+        return currentY;
+      };
+  
+  
+      // ---
+      // Key Change: Refined splitTextByScript
+      // ---
+      const splitTextByScript = (text) => {
+        if (!text) return [];
+  
+        const segments = [];
+        let currentScript = detectScript(text[0]);
+        let currentSegment = { script: currentScript, text: '' };
+  
+        for (let i = 0; i < text.length; i++) {
+          const char = text[i];
+          const charScript = detectScript(char);
+  
+          // Define characters that don't force a script break (e.g., spaces, punctuation, numbers)
+          const nonBreakingChars = [' ', '.', ',', '!', '?', ':', ';', '-', '(', ')', '[', ']', '{', '}', '\'', '"'];
+          const isNumber = !isNaN(parseInt(char));
+  
+          if (charScript !== currentScript) {
+            // If the character is a space, punctuation, or a number,
+            // and the current segment is not empty, append it to the current segment
+            // rather than forcing a new segment. This allows numbers and punctuation
+            // to stick with the surrounding language.
+            if (nonBreakingChars.includes(char) || isNumber) {
+              currentSegment.text += char;
+            } else {
+              // Only create a new segment if it's a genuine script change
+              // (e.g., from Devanagari letter to a Latin letter, or vice versa,
+              // and it's not just punctuation or a number).
+              if (currentSegment.text) {
+                segments.push(currentSegment);
+              }
+              currentScript = charScript;
+              currentSegment = { script: currentScript, text: char };
+            }
+          } else {
+            currentSegment.text += char;
+          }
+        }
+  
+        if (currentSegment.text) {
+          segments.push(currentSegment);
+        }
+        return segments;
+      };
+  
+  
+      // Get appropriate font for script (remains the same)
+      const getFontForScript = (script) => {
+        const fontMap = {
+          devanagari: 'notosansdevanagari',
+          bengali: 'notosansbengali',
+          tamil: 'notosanstamil',
+          telugu: 'notosanstelugu',
+          gujarati: 'notosansgujarati',
+          kannada: 'notosanskannada',
+          malayalam: 'notosansmalayalam',
+          arabic: 'notosansarabic',
+          latin: 'notosans'
+        };
+        return fontMap[script] || 'notosans';
+      };
+  
+      // Add title (centered)
+      const title = selectedLanguage === 'hi' ? 'वीडियो विश्लेषण रिपोर्ट' :
+        selectedLanguage === 'mr' ? 'व्हिडिओ विश्लेषण अहवाल' :
+        'Video Analysis Report';
+      yPosition = renderMixedContent(title, 105, yPosition, pageWidth, 20, 'center');
+      yPosition += 15;
+  
+      // Add date and language info
+      const dateText = selectedLanguage === 'hi' ? `जनरेट किया गया: ${new Date().toLocaleDateString()}` :
+        selectedLanguage === 'mr' ? `तयार केले: ${new Date().toLocaleDateString()}` :
+        `Generated on: ${new Date().toLocaleDateString()}`;
+      yPosition = renderMixedContent(dateText, 105, yPosition, pageWidth, 12, 'center');
+      yPosition += 15;
   
       // Add summary if selected
       if (pdfOptions.includeSummary && summary) {
-        doc.setFontSize(16);
-        doc.text('Summary', 14, yPosition);
+        const summaryTitle = selectedLanguage === 'hi' ? 'सारांश' :
+          selectedLanguage === 'mr' ? 'सारांश' :
+          'Summary';
+        yPosition = renderMixedContent(summaryTitle, leftMargin, yPosition, pageWidth, 16);
         yPosition += 10;
-        doc.setFontSize(12);
-        const splitSummary = doc.splitTextToSize(summary, 180);
-        doc.text(splitSummary, 14, yPosition);
-        yPosition += splitSummary.length * 7 + 20;
-        doc.addPage();
-        yPosition = 20;
+        yPosition = renderMixedContent(summary, leftMargin, yPosition, pageWidth, 12);
+        yPosition += 20;
       }
   
       // Add notes if selected
       if (pdfOptions.includeNotes && notes) {
-        doc.setFontSize(16);
-        doc.text('Smart Notes', 14, yPosition);
+        const notesTitle = selectedLanguage === 'hi' ? 'स्मार्ट नोट्स' :
+          selectedLanguage === 'mr' ? 'स्मार्ट नोट्स' :
+          'Smart Notes';
+        yPosition = renderMixedContent(notesTitle, leftMargin, yPosition, pageWidth, 16);
         yPosition += 10;
-        doc.setFontSize(12);
-        const splitNotes = doc.splitTextToSize(notes, 180);
-        doc.text(splitNotes, 14, yPosition);
-        yPosition += splitNotes.length * 7 + 20;
-        doc.addPage();
-        yPosition = 20;
+        yPosition = renderMixedContent(notes, leftMargin, yPosition, pageWidth, 12);
+        yPosition += 20;
       }
   
-      // Add transcript if selected
+      // Add transcript if selected (smaller font)
       if (pdfOptions.includeTranscript && transcript) {
-        doc.setFontSize(16);
-        doc.text('Transcript', 14, yPosition);
+        const transcriptTitle = selectedLanguage === 'hi' ? 'ट्रांसक्रिप्ट' :
+          selectedLanguage === 'mr' ? 'लिप्यंतरण' :
+          'Transcript';
+        yPosition = renderMixedContent(transcriptTitle, leftMargin, yPosition, pageWidth, 16);
         yPosition += 10;
-        doc.setFontSize(10);
-        const splitTranscript = doc.splitTextToSize(transcript, 180);
-        doc.text(splitTranscript, 14, yPosition);
-        yPosition += splitTranscript.length * 5 + 20;
-        doc.addPage();
-        yPosition = 20;
+        yPosition = renderMixedContent(transcript, leftMargin, yPosition, pageWidth, 10);
+        yPosition += 20;
       }
   
-      // Add frames if selected - NEW IMPROVED VERSION
+      // Add frames if selected
       if (pdfOptions.includeFrames && frameUrls.length > 0) {
-        doc.setFontSize(16);
-        doc.text('Key Frames', 105, yPosition, { align: 'center' });
+        const framesTitle = selectedLanguage === 'hi' ? 'मुख्य फ्रेम' :
+          selectedLanguage === 'mr' ? 'मुख्य चित्रे' :
+          'Key Frames';
+        yPosition = renderMixedContent(framesTitle, 105, yPosition, pageWidth, 16, 'center');
         yPosition += 20;
   
-        // Create a temporary container for images
         const tempContainer = document.createElement('div');
         tempContainer.style.position = 'absolute';
         tempContainer.style.left = '-9999px';
         document.body.appendChild(tempContainer);
   
         try {
+          const imgWidth = 80;
+          let xPosition = leftMargin;
+  
           for (let i = 0; i < frameUrls.length; i++) {
             const img = document.createElement('img');
             img.src = frameUrls[i].url;
@@ -998,52 +1495,166 @@ const formatInlineElements = (text) => {
             img.style.height = 'auto';
             tempContainer.appendChild(img);
   
-            // Wait for image to load
             await new Promise((resolve) => {
               img.onload = resolve;
-              img.onerror = resolve; // Continue even if one image fails
+              img.onerror = resolve;
             });
   
-            // Calculate dimensions
-            const imgWidth = 80;
-            const imgHeight = img.naturalHeight ? 
-              (img.naturalHeight * imgWidth) / img.naturalWidth : 
-              60; // Fallback height
+            const imgHeight = img.naturalHeight ?
+              (img.naturalHeight * imgWidth) / img.naturalWidth : 60;
   
-            // Add new page if needed
-            if (i > 0 && i % 2 === 0) {
+            if (yPosition + imgHeight > 280) {
               doc.addPage();
               yPosition = 20;
+              xPosition = leftMargin;
+            } else if (i > 0 && (xPosition + imgWidth + 10) > (doc.internal.pageSize.getWidth() - rightMargin)) {
+              yPosition += imgHeight + 10;
+              xPosition = leftMargin;
             }
   
-            // Add image to PDF
             doc.addImage(
-              img, 
-              'JPEG', 
-              i % 2 === 0 ? 20 : 110, 
-              yPosition, 
-              imgWidth, 
+              img,
+              'JPEG',
+              xPosition,
+              yPosition,
+              imgWidth,
               imgHeight
             );
   
-            if (i % 2 === 1) {
-              yPosition += imgHeight + 10;
-            }
+            xPosition += imgWidth + 10;
           }
         } finally {
-          // Clean up
           document.body.removeChild(tempContainer);
         }
       }
   
-      // Save the PDF
-      doc.save('video-analysis-report.pdf');
-      
+      const filename = selectedLanguage === 'hi' ? 'वीडियो-विश्लेषण-रिपोर्ट.pdf' :
+        selectedLanguage === 'mr' ? 'व्हिडिओ-विश्लेषण-अहवाल.pdf' :
+        'video-analysis-report.pdf';
+      doc.save(filename);
+  
     } catch (error) {
       console.error('Error generating PDF:', error);
-      alert('Failed to generate PDF. Please try again.');
+      const errorMsg = selectedLanguage === 'hi' ? 'PDF जनरेट करने में विफल। कृपया पुनः प्रयास करें।' :
+        selectedLanguage === 'mr' ? 'PDF तयार करण्यात अयशस्वी. कृपया पुन्हा प्रयत्न करा.' :
+        'Failed to generate PDF. Please try again.';
+      alert(errorMsg);
     } finally {
       setIsGeneratingPdf(false);
+    }
+  };
+  
+  // Font loading function (remains the same)
+  async function loadFonts(doc) {
+    const fontUrls = {
+      notosans: '/fonts/NotoSans-Regular.ttf',
+      notosansdevanagari: '/fonts/NotoSansDevanagari-Regular.ttf',
+      notosansbengali: '/fonts/NotoSansBengali-Regular.ttf',
+      notosanstamil: '/fonts/NotoSansTamil-Regular.ttf',
+      notosanstelugu: '/fonts/NotoSansTelugu-Regular.ttf',
+      notosansgujarati: '/fonts/NotoSansGujarati-Regular.ttf',
+      notosanskannada: '/fonts/NotoSansKannada-Regular.ttf',
+      notosansmalayalam: '/fonts/NotoSansMalayalam-Regular.ttf',
+      notosansarabic: '/fonts/NotoSansArabic-Regular.ttf'
+    };
+  
+    for (const [fontName, url] of Object.entries(fontUrls)) {
+      try {
+        const response = await fetch(url);
+        const fontData = await response.arrayBuffer();
+        const fontBase64 = arrayBufferToBase64(fontData);
+        doc.addFileToVFS(`${fontName}.ttf`, fontBase64);
+        doc.addFont(`${fontName}.ttf`, fontName, 'normal');
+      } catch (error) {
+        console.warn(`Failed to load font ${fontName}:`, error);
+      }
+    }
+  }
+  
+  // Helper function (remains the same)
+  function arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary);
+  }
+
+  useEffect(() => {
+    // You can use this to verify supported languages if needed
+    fetch('http://localhost:5000/api/get_supported_languages')
+      .then(res => res.json())
+      .then(data => console.log("Supported languages:", data))
+      .catch(err => console.error("Failed to fetch languages:", err));
+  }, []);
+
+  const handleLanguageChange = async (languageCode) => {
+    if (!outputDir) return;
+    
+    try {
+      setIsProcessing(true);
+      setLoadingStatus(`Generating content in ${languages.find(l => l.code === languageCode)?.name}...`);
+      
+      // Create abort controller for cleanup
+      const controller = new AbortController();
+      
+      // 1. Generate transcript
+      const transcriptResponse = await fetch(`http://localhost:5000/api/generate_transcript/${outputDir}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: languageCode }),
+        signal: controller.signal
+      });
+      
+      if (!transcriptResponse.ok) {
+        throw new Error("Transcript generation failed");
+      }
+      
+      const transcriptData = await transcriptResponse.json();
+      
+      // 2. Generate summary
+      const summaryResponse = await fetch(`http://localhost:5000/api/generate_summary/${outputDir}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: languageCode }),
+        signal: controller.signal
+      });
+      
+      if (!summaryResponse.ok) {
+        throw new Error("Summary generation failed");
+      }
+      
+      const summaryData = await summaryResponse.json();
+      
+      // 3. Update UI state only after both succeed
+      setSelectedLanguage(languageCode);
+      setTranscript(transcriptData.transcript);
+      setSummary(summaryData.summary);
+      setTranscriptionReady(true);
+      
+      // 4. Update chat session language if exists
+      if (chatSessionId) {
+        await fetch('http://localhost:5000/api/chat/set_language', {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ 
+            session_id: chatSessionId,
+            language: languageCode
+          }),
+          signal: controller.signal
+        });
+      }
+      
+      setLoadingStatus(`✅ Content generated in ${languages.find(l => l.code === languageCode)?.name}`);
+      
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        console.error("Language change error:", err);
+        setLoadingStatus(`❌ Failed to generate content: ${err.message}`);
+      }
+    } finally {
+      setIsProcessing(false);
     }
   };
   
@@ -1082,46 +1693,61 @@ const formatInlineElements = (text) => {
       </div>
       
       {/* Chat messages container with fixed height and scrolling */}
-      <div className="flex-1 overflow-y-auto p-4" style={{ maxHeight: '400px' }}>
-        {messages.map((msg, idx) => (
-          <div key={idx} className={`mb-3 flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}>
-            <div className={`max-w-xs md:max-w-md rounded-2xl px-4 py-2 ${
-  msg.sender === "user" 
-    ? "bg-purple-600 text-white rounded-br-none" 
-    : "bg-gray-100 text-gray-800 rounded-bl-none"
-}`}>
-  {msg.isTyping ? (
-    <div className="flex space-x-1 items-center">
-      <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"></div>
-      <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-      <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0.4s' }}></div>
-    </div>
-  ) : (
-    <>
-      <div className="whitespace-pre-wrap">
-        {formatMessageText(msg.text)}
+       {/* In your return statement, modify the chat messages rendering: */}
+<div className="flex-1 overflow-y-auto p-4" style={{ maxHeight: '400px' }}>
+  {messages.map((msg, idx) => (
+    <div key={idx} className={`mb-3 flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}>
+      <div className={`max-w-xs md:max-w-md rounded-2xl px-4 py-2 ${
+        msg.sender === "user" 
+          ? "bg-purple-600 text-white rounded-br-none" 
+          : msg.isSystem
+            ? "bg-indigo-100 text-indigo-800 border border-indigo-200"
+            : "bg-gray-100 text-gray-800 rounded-bl-none"
+      }`}>
+        {msg.isTyping ? (
+          <div className="flex space-x-1 items-center">
+            <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"></div>
+            <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+            <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+          </div>
+        ) : (
+          <>
+            <div className="whitespace-pre-wrap">
+              {formatMessageText(msg.text)}
+            </div>
+            {msg.reference && (
+              <div className="mt-1 text-xs opacity-80">
+                {msg.reference}
+              </div>
+            )}
+            {msg.frame && (
+              <div className="mt-2">
+                <img 
+                  src={msg.frame} 
+                  alt={`Frame from video`}
+                  className="rounded-lg cursor-pointer max-h-40 object-contain"
+                  onClick={() => handleFrameClick(msg.frame, idx)}
+                />
+              </div>
+            )}
+          </>
+        )}
       </div>
-      {msg.reference && (
-        <div className="mt-1 text-xs opacity-80">
-          {msg.reference}
+    </div>
+  ))}
+  {isStartingSession && (
+    <div className="flex justify-start">
+      <div className="bg-gray-100 text-gray-800 rounded-2xl px-4 py-2 rounded-bl-none">
+        <div className="flex space-x-1 items-center">
+          <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"></div>
+          <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+          <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+          <span className="ml-2">Initializing video context...</span>
         </div>
-      )}
-      {msg.frame && (
-        <div className="mt-2">
-          <img 
-            src={msg.frame} 
-            alt={`Frame from video`}
-            className="rounded-lg cursor-pointer max-h-40 object-contain"
-            onClick={() => handleFrameClick(msg.frame, idx)}
-          />
-        </div>
-      )}
-    </>
+      </div>
+    </div>
   )}
 </div>
-          </div>
-        ))}
-      </div>
 
       {/* Input area - fixed at bottom */}
       <div className="border-t border-gray-200 p-3">
@@ -1205,35 +1831,79 @@ const formatInlineElements = (text) => {
 
     {/* Right side - Action buttons and output info */}
     <div className="flex items-center gap-3">
+    {/* // Add this component near your other action buttons */}
+<div className="relative">
+  <button 
+    onClick={() => setShowLanguageSelector(!showLanguageSelector)}
+    className="flex items-center gap-1 px-3 py-1 border border-gray-300 rounded-md text-sm hover:bg-gray-50"
+  >
+    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129" />
+    </svg>
+    {languages.find(l => l.code === selectedLanguage)?.name}
+    <svg className={`w-4 h-4 transition-transform ${showLanguageSelector ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+    </svg>
+  </button>
+
+  {showLanguageSelector && (
+    <div className="absolute z-10 mt-1 w-48 bg-white rounded-md shadow-lg border border-gray-200 max-h-60 overflow-y-auto">
+      {languages.map((lang) => (
+        <button
+          key={lang.code}
+          onClick={() => {
+            setSelectedLanguage(lang.code);
+            setShowLanguageSelector(false);
+            handleLanguageChange(lang.code);
+          }}
+          className={`block w-full text-left px-4 py-2 text-sm ${
+            selectedLanguage === lang.code
+              ? 'bg-purple-100 text-purple-800'
+              : 'text-gray-700 hover:bg-gray-100'
+          }`}
+        >
+          {lang.name}
+        </button>
+      ))}
+    </div>
+  )}
+</div>
       {/* Generate Summary button (conditional) */}
       {showSummaryButton && (
-        <button 
-          onClick={handleGenerateSummary}
-          disabled={isProcessing}
-          className={`px-3 py-1 rounded-md text-sm flex items-center ${
-            isProcessing 
-              ? 'bg-purple-400 cursor-not-allowed' 
-              : 'bg-purple-600 hover:bg-purple-700'
-          } text-white transition-colors`}
-        >
-          {isProcessing ? (
-            <>
-              <svg className="w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              Processing...
-            </>
-          ) : (
-            <>
-              <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-              </svg>
-              Generate Summary
-            </>
-          )}
-        </button>
+  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+    <button 
+      onClick={handleGenerateSummary}
+      disabled={isProcessing}
+      className={`px-3 py-1 rounded-md text-sm flex items-center ${
+        isProcessing 
+          ? 'bg-purple-400 cursor-not-allowed' 
+          : 'bg-purple-600 hover:bg-purple-700'
+      } text-white transition-colors`}
+    >
+      {isProcessing ? (
+        <>
+          <svg className="w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          Processing...
+        </>
+      ) : (
+        <>
+          <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+          Generate Summary
+        </>
       )}
+    </button>
+
+    {/* Add the language selector here */}
+    <div className="relative">
+      {/* ... language selector code from above ... */}
+    </div>
+  </div>
+)}
 
       {/* Output directory info */}
       {outputDir && (
@@ -1259,127 +1929,162 @@ const formatInlineElements = (text) => {
   )}
 </div>
 
-      {/* Summary Section */}
-      {transcriptionReady && summary && (
-         <div className="bg-white rounded-xl shadow-lg overflow-hidden mb-6">
-          <div className="p-4 border-b border-gray-200">
-            <h3 className="text-lg font-bold text-purple-700 flex items-center">
-              <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16m-7 6h7" />
-              </svg>
-              Video Summary
-            </h3>
-          </div>
-          <div className="p-4">
-            <div className="whitespace-pre-wrap text-gray-700">
-              {summary}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Smart Notes Section */}
-{notes && (
-  <div className="bg-white rounded-xl shadow-lg overflow-hidden mb-6">
-    <div className="p-4 border-b border-gray-200 flex justify-between items-center">
-      <h3 className="text-lg font-bold text-purple-700 flex items-center">
-        <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-        </svg>
-        Smart Notes
-      </h3>
-      <a 
-        href={`http://localhost:5000/api/results/${outputDir}/smart_notes.md`} 
-        download
-        className="text-sm text-purple-600 hover:text-purple-800 flex items-center"
-      >
-        <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-        </svg>
-        Download
-      </a>
-    </div>
-    <div className="p-4 max-h-96 overflow-y-auto">
-      <div 
-        className="prose max-w-none" 
-        dangerouslySetInnerHTML={{ __html: marked.parse(notes) }}
-      />
-    </div>
-    {isGeneratingNotes && (
-      <div className="p-4 bg-gray-50 text-center text-sm text-gray-500">
-        <svg className="w-4 h-4 inline-block animate-spin mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-        </svg>
-        {notesStatus}
-      </div>
-    )}
-  </div>
-)}
-
-      {/* Transcript Section */}
-      {transcriptionReady && transcript && (
-       <div className="bg-white rounded-xl shadow-lg overflow-hidden mb-6">
-          <div className="p-4 border-b border-gray-200">
-            <h3 className="text-lg font-bold text-purple-700 flex items-center">
-              <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              Video Transcript
-            </h3>
-          </div>
-          <div className="p-4 max-h-96 overflow-y-auto">
-            <div className="whitespace-pre-wrap text-gray-700">
-              {transcript}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Frames Section */}
-      {frameUrls.length > 0 ? (
-      <div className="bg-white rounded-xl shadow-lg overflow-hidden">
-        <div className="p-4 border-b border-gray-200">
-          <h3 className="text-lg font-bold text-purple-700 flex items-center">
-            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            Key Frames ({frameUrls.length})
-          </h3>
-        </div>
-        
-        <div className="p-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-          {frameUrls.map((frame) => (
-            <div 
-              key={frame.number}
-              className="group relative rounded-lg overflow-hidden shadow-md hover:shadow-lg transition-shadow cursor-pointer"
-              onClick={() => handleFrameClick(frame.url, frame.number)}
-            >
-              <img
-                src={frame.url}
-                alt={`Frame ${frame.number}`}
-                className="w-full h-32 object-cover"
-                onError={(e) => {
-                  e.target.src = '/placeholder-image.png';
-                  console.error('Failed to load frame:', frame.url);
-                }}
-              />
-              <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-2">
-                <span className="text-white text-sm font-medium">Frame {frame.number}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    ) : (
-      loadingStatus === "✅ Analysis complete" && (
-        <div className="bg-white rounded-xl shadow-lg p-6 text-center">
-          <svg className="w-12 h-12 mx-auto text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+{/* Tabbed Interface */}
+<div className="bg-white rounded-xl shadow-lg overflow-hidden mb-6">
+      {/* Tab Headers */}
+      <div className="flex border-b border-gray-200">
+        <button
+          className={`px-4 py-3 font-medium text-sm flex items-center ${activeTab === 'summary' ? 'text-purple-600 border-b-2 border-purple-600' : 'text-gray-500 hover:text-gray-700'}`}
+          onClick={() => setActiveTab('summary')}
+        >
+          <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16m-7 6h7" />
           </svg>
-          <p className="text-gray-500">No frames available to display</p>
-        </div>
-      )
-    )}
+          {selectedLanguage === 'hi' ? 'सारांश' : selectedLanguage === 'mr' ? 'सारांश' : 'Summary'}
+        </button>
+
+        <button
+          className={`px-4 py-3 font-medium text-sm flex items-center ${activeTab === 'notes' ? 'text-purple-600 border-b-2 border-purple-600' : 'text-gray-500 hover:text-gray-700'}`}
+          onClick={() => setActiveTab('notes')}
+        >
+          <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+          {selectedLanguage === 'hi' ? 'स्मार्ट नोट्स' : selectedLanguage === 'mr' ? 'स्मार्ट नोट्स' : 'Smart Notes'}
+        </button>
+
+        <button
+          className={`px-4 py-3 font-medium text-sm flex items-center ${activeTab === 'frames' ? 'text-purple-600 border-b-2 border-purple-600' : 'text-gray-500 hover:text-gray-700'}`}
+          onClick={() => setActiveTab('frames')}
+        >
+          <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+          {selectedLanguage === 'hi' ? 'मुख्य फ़्रेम' : selectedLanguage === 'mr' ? 'मुख्य चित्रे' : 'Key Frames'} ({frameUrls.length})
+        </button>
+
+        {/* --- New Tab Header --- */}
+        <button
+          className={`px-4 py-3 font-medium text-sm flex items-center ${activeTab === 'revision' ? 'text-purple-600 border-b-2 border-purple-600' : 'text-gray-500 hover:text-gray-700'}`}
+          onClick={() => setActiveTab('revision')}
+        >
+          <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.747 0-3.332.477-4.5 1.253" />
+          </svg>
+          {selectedLanguage === 'hi' ? 'त्वरित पुनरीक्षण' : selectedLanguage === 'mr' ? 'जलद उजळणी' : 'Quick Revision'}
+        </button>
+        {/* --- End New Tab Header --- */}
+      </div>
+
+      {/* Tab Content */}
+      <div className="p-4">
+        {/* Summary Tab */}
+        {activeTab === 'summary' && transcriptionReady && summary && (
+          <div className="whitespace-pre-wrap text-gray-700 animate-fadeIn">
+            {summary}
+          </div>
+        )}
+
+        {/* Smart Notes Tab */}
+        {activeTab === 'notes' && (
+          <div className="animate-fadeIn">
+            {notes ? (
+              <>
+                <div className="flex justify-end mb-4">
+                  <a
+                    href={`http://localhost:5000/api/results/${outputDir}/smart_notes.md`}
+                    download
+                    className="text-sm text-purple-600 hover:text-purple-800 flex items-center"
+                  >
+                    <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    {selectedLanguage === 'hi' ? 'डाउनलोड करें' : selectedLanguage === 'mr' ? 'डाउनलोड करा' : 'Download'}
+                  </a>
+                </div>
+                <div
+                  className="prose max-w-none max-h-[calc(100vh-300px)] overflow-y-auto"
+                  dangerouslySetInnerHTML={{ __html: marked.parse(notes) }}
+                />
+              </>
+            ) : (
+              <div className="text-center py-8 text-gray-500">
+                {isGeneratingNotes ? (
+                  <div className="flex items-center justify-center">
+                    <svg className="w-5 h-5 mr-2 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    {notesStatus}
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center">
+                    <p className="mb-4">{selectedLanguage === 'hi' ? 'अभी तक कोई नोट्स जनरेट नहीं हुए हैं।' : selectedLanguage === 'mr' ? 'अद्याप कोणतेही नोट्स तयार केले नाहीत.' : 'No notes generated yet.'}</p>
+                    <button
+                      onClick={generateSmartNotes}
+                      className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
+                      disabled={isGeneratingNotes}
+                    >
+                      <svg className="w-5 h-5 mr-2 -ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                      {selectedLanguage === 'hi' ? 'स्मार्ट नोट्स जनरेट करें' : selectedLanguage === 'mr' ? 'स्मार्ट नोट्स तयार करा' : 'Generate Smart Notes'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Key Frames Tab */}
+        {activeTab === 'frames' && (
+          <div className="animate-fadeIn">
+            {frameUrls.length > 0 ? (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                {frameUrls.map((frame) => (
+                  <div
+                    key={frame.number}
+                    className="group relative rounded-lg overflow-hidden shadow-md hover:shadow-lg transition-shadow cursor-pointer"
+                    onClick={() => handleFrameClick(frame.url, frame.number)}
+                  >
+                    <img
+                      src={frame.url}
+                      alt={`Frame ${frame.number}`}
+                      className="w-full h-32 object-cover"
+                      onError={(e) => {
+                        e.target.src = '/placeholder-image.png';
+                        console.error('Failed to load frame:', frame.url);
+                      }}
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-2">
+                      <span className="text-white text-sm font-medium">{selectedLanguage === 'hi' ? `फ़्रेम ${frame.number}` : selectedLanguage === 'mr' ? `फ्रेम ${frame.number}` : `Frame ${frame.number}`}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-gray-500">
+                <svg className="w-12 h-12 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+                <p>{selectedLanguage === 'hi' ? 'प्रदर्शित करने के लिए कोई फ़्रेम उपलब्ध नहीं हैं' : selectedLanguage === 'mr' ? 'प्रदर्शित करण्यासाठी कोणतेही फ्रेम्स उपलब्ध नाहीत' : 'No frames available to display'}</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* --- New Quick Revision Tab Content --- */}
+        {activeTab === 'revision' && (
+          <QuickRevision
+            summary={summary}
+            transcript={transcript}
+            selectedLanguage={selectedLanguage}
+          />
+        )}
+        {/* --- End New Quick Revision Tab Content --- */}
+      </div>
+    </div>
+  
 
       {/* Frame Preview Modal */}
       {showModal && selectedFrame && (
@@ -1475,7 +2180,7 @@ const formatInlineElements = (text) => {
               <span>Include Smart Notes</span>
             </label>
             
-            <label className="flex items-center space-x-3">
+            {/* <label className="flex items-center space-x-3">
               <input
                 type="checkbox"
                 checked={pdfOptions.includeTranscript}
@@ -1483,7 +2188,7 @@ const formatInlineElements = (text) => {
                 className="form-checkbox h-5 w-5 text-purple-600 rounded"
               />
               <span>Include Transcript</span>
-            </label>
+            </label> */}
           </div>
           
           <div className="flex justify-end space-x-3">

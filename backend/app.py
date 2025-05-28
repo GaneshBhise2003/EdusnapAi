@@ -884,51 +884,96 @@ def generate_notes(output_dir):
 
 
 # Add this new helper function
-def generate_notes_with_gemini(transcript):
-    """Generate structured notes from transcript using Gemini"""
+def generate_notes_with_gemini(transcript, target_language_code="en"):
+    """
+    Generate structured notes from transcript using Gemini in the specified language.
+    target_language_code: 'en', 'hi', 'mr', etc.
+    """
     try:
         headers = {"Content-Type": "application/json"}
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={GEMINI_API_KEY}"
 
-        prompt = """**Instruction**: Convert this video transcript into well-organized Markdown notes with bullet points. Follow these rules:
+        # Determine language instruction based on code
+        lang_instruction = ""
+        if target_language_code == 'hi':
+            lang_instruction = "Generate the notes in **Hindi**."
+        elif target_language_code == 'mr':
+            lang_instruction = "Generate the notes in **Marathi**."
+        else:
+            lang_instruction = "Generate the notes in **English**." # Default to English
+
+        prompt = f"""**Instruction**: Convert this video transcript into well-organized Markdown notes with bullet points. Follow these rules:
 
 1. Identify natural sections/topics based on content
 2. For each section:
-   - Add a ### heading
-   - Include 3-5 key bullet points
-   - Use concise, clear language
+    - Add a ### heading
+    - Include 3-5 key bullet points
+    - Use concise, clear language
 3. Highlight important terms in **bold**
-4. Add timestamps in parentheses where topics change
+4. Add timestamps in parentheses where topics change (if present in transcript or inferred)
 5. Keep technical concepts accurate
+{lang_instruction}
 
 **Transcript**:
 {transcript}
 
 **Output ONLY the Markdown notes, no additional commentary**:"""
-        
+
         payload = {
             "contents": [{
                 "parts": [{"text": prompt.format(transcript=transcript)}]
             }],
             "generationConfig": {
-                "temperature": 0.2,  # Lower for more factual output
+                "temperature": 0.2,
                 "maxOutputTokens": 4000
             }
         }
 
-        print("[INFO] Sending request to Gemini for notes generation...")
+        print(f"[INFO] Sending request to Gemini for notes generation in {target_language_code}...")
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         result = response.json()
-        
+
         notes = result["candidates"][0]["content"]["parts"][0]["text"]
         print("[INFO] Successfully generated smart notes")
         return notes
-        
+
     except Exception as e:
         print(f"[ERROR] Gemini notes generation failed: {str(e)}")
         raise Exception("AI notes generation failed")
-    
+
+# --- Modified Smart Notes API Endpoint ---
+@app.route('/api/generate_notes', methods=['POST'])
+def generate_notes_api():
+    try:
+        data = request.json
+        transcript = data.get('transcript')
+        output_dir_name = data.get('output_dir')
+        selected_language = data.get('language', 'en') # <<< GET LANGUAGE HERE >>>
+
+        if not transcript:
+            return jsonify({'status': 'error', 'message': 'Transcript is required to generate notes.'}), 400
+        if not output_dir_name:
+            return jsonify({'status': 'error', 'message': 'output_dir is required.'}), 400
+
+        print(f"[INFO] Received request to generate smart notes for {output_dir_name} in language: {selected_language}")
+
+        # Pass the selected_language to generate_notes_with_gemini
+        smart_notes = generate_notes_with_gemini(transcript, selected_language) # <<< PASS LANGUAGE >>>
+
+        # Save the generated smart notes to a file (optional, but good for persistence/download)
+        output_dir_path = os.path.join(OUTPUT_FOLDER, output_dir_name)
+        os.makedirs(output_dir_path, exist_ok=True)
+        smart_notes_path = os.path.join(output_dir_path, f'smart_notes_{selected_language}.md') # Save with language suffix
+        with open(smart_notes_path, 'w', encoding='utf-8') as f:
+            f.write(smart_notes)
+        print(f"[INFO] Smart notes saved to: {smart_notes_path}")
+
+        return jsonify({'status': 'success', 'notes': smart_notes}), 200
+
+    except Exception as e:
+        print(f"[ERROR] Failed to generate smart notes: {str(e)}")
+        return jsonify({'status': 'error', 'message': f"Failed to generate smart notes: {str(e)}"}), 500
 
 # Update the ChatSession class to handle multiple languages
 class ChatSession:
@@ -1396,6 +1441,155 @@ def generate_transcript(output_dir):
             'message': 'Transcript generation failed',
             'details': str(e)
         }), 500)
+    
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Error handler decorator
+def handle_errors(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"Error in {f.__name__}: {str(e)}", exc_info=True)
+            return jsonify({
+                'status': 'error',
+                'message': 'An internal server error occurred',
+                'error': str(e)
+            }), 500
+    return wrapper
+
+
+
+@app.route('/api/generate-qa', methods=['POST'])
+@handle_errors
+def generate_qa():
+    """
+    Generate Q&A pairs from text using Gemini API
+    Expects JSON payload: {'text': '...', 'language': 'en'}
+    Returns JSON: {'qaPairs': [{'id': 1, 'question': '...', 'answer': '...'}]}
+    """
+    # Validate input
+    if not request.is_json:
+        return jsonify({'error': 'Request must be JSON'}), 400
+
+    data = request.get_json()
+    text = data.get('text', '').strip()
+    language = data.get('language', 'en').lower()
+
+    if not text:
+        return jsonify({'error': 'Text content is required'}), 400
+
+    if language not in SUPPORTED_LANGUAGES:
+        return jsonify({
+            'error': f'Unsupported language. Supported: {list(SUPPORTED_LANGUAGES.keys())}'
+        }), 400
+
+    # Construct language-specific prompt
+    PROMPT_TEMPLATES = {
+        'hi': (
+            "निम्नलिखित वीडियो सामग्री से 5 महत्वपूर्ण प्रश्न और उत्तर उत्पन्न करें। "
+            "उत्तर संक्षिप्त और सटीक होने चाहिए। "
+            "केवल JSON प्रारूप में उत्तर दें: [{\"question\": \"...\", \"answer\": \"...\"}]\n\n"
+            "सामग्री: {text}"
+        ),
+        'mr': (
+            "खालील व्हिडिओ मजकुरावरून 5 महत्त्वाचे प्रश्न आणि उत्तरे तयार करा. "
+            "उत्तरे संक्षिप्त आणि स्पष्ट असावीत. "
+            "फक्त JSON स्वरूपात उत्तर द्या: [{\"question\": \"...\", \"answer\": \"...\"}]\n\n"
+            "मजकूर: {text}"
+        ),
+        'en': (
+            "Generate 5 important questions and answers from the following video content. "
+            "Answers should be concise and accurate. "
+            "Return only in JSON format: [{\"question\": \"...\", \"answer\": \"...\"}]\n\n"
+            "Content: {text}"
+        )
+    }
+
+    prompt = PROMPT_TEMPLATES.get(language, PROMPT_TEMPLATES['en']).format(text=text)
+
+    # Call Gemini API
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={GEMINI_API_KEY}",
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.5,
+                    "maxOutputTokens": 1000,
+                    "responseMimeType": "application/json"
+                }
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=30  # 30 second timeout
+        )
+        response.raise_for_status()
+        
+        # Parse response
+        result = response.json()
+        gemini_response = result["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # Improved JSON extraction
+        json_match = re.search(r'\[.*\]', gemini_response, re.DOTALL)
+        if not json_match:
+            logger.error(f"Could not find JSON array in response: {gemini_response}")
+            return jsonify({'error': 'Could not parse AI response'}), 500
+            
+        try:
+            qa_pairs = json.loads(json_match.group(0))
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}\nResponse: {gemini_response}")
+            return jsonify({'error': 'Invalid response format from AI'}), 500
+
+        # Validate and format Q&A pairs
+        validated_pairs = []
+        for idx, pair in enumerate(qa_pairs, 1):
+            if not isinstance(pair, dict):
+                continue
+                
+            question = pair.get('question', '').strip()
+            answer = pair.get('answer', '').strip()
+            
+            if question and answer:
+                validated_pairs.append({
+                    'id': idx,
+                    'question': question,
+                    'answer': answer
+                })
+
+        if not validated_pairs:
+            return jsonify({'error': 'No valid Q&A pairs generated'}), 400
+
+        return jsonify({
+            'status': 'success',
+            'qaPairs': validated_pairs,
+            'language': language
+        })
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Gemini API request failed: {str(e)}")
+        return jsonify({
+            'error': 'Failed to communicate with AI service',
+            'details': str(e)
+        }), 502
+    except KeyError as e:
+        logger.error(f"Unexpected response format from Gemini: {str(e)}")
+        return jsonify({
+            'error': 'Unexpected response from AI service'
+        }), 502
+
+@app.route('/api/generate-qa', methods=['OPTIONS'])
+def qa_options():
+    """Handle OPTIONS for CORS preflight"""
+    response = jsonify({'status': 'ok'})
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+    response.headers.add('Access-Control-Allow-Methods', 'POST')
+    return response
+
 
 if __name__ == '__main__':
     print("[INFO] Starting Flask server on http://0.0.0.0:5000 ...")
